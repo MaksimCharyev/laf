@@ -26,7 +26,7 @@
   #include <libproc.h>
 #endif
 
-#if LAF_LINUX
+#if LAF_LINUX || LAF_ANDROID
   #include <cstdlib>
   #include <cstring>
 #endif

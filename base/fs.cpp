@@ -208,8 +208,8 @@ std::string get_relative_path(const std::string& filename, const std::string& ba
 
   while (itFrom != baseDirs.end() &&
          itTo != toParts.end()
-#if LAF_LINUX
-         // The Linux file system is case sensitive
+#if LAF_LINUX || LAF_ANDROID
+         // The Linux/Android file system is case sensitive
          && *itFrom == *itTo
 #else
          && base::string_to_lower(*itFrom) == base::string_to_lower(*itTo)
