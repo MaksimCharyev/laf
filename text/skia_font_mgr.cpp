@@ -17,6 +17,8 @@
   #include "include/ports/SkFontMgr_mac_ct.h"
 #elif LAF_LINUX
   #include "include/ports/SkFontMgr_fontconfig.h"
+#elif LAF_ANDROID
+  #include "include/ports/SkFontMgr_android.h"
 #endif
 
 namespace text {
@@ -118,6 +120,8 @@ SkiaFontMgr::SkiaFontMgr()
   m_skFontMgr = SkFontMgr_New_CoreText(nullptr);
 #elif LAF_LINUX
   m_skFontMgr = SkFontMgr_New_FontConfig(nullptr);
+#elif LAF_ANDROID
+  m_skFontMgr = SkFontMgr_New_Android(nullptr);
 #endif
   if (!m_skFontMgr)
     m_skFontMgr = SkFontMgr::RefEmpty();
