@@ -15,6 +15,8 @@
   #include "os/osx/event_queue.h"
 #elif LAF_LINUX
   #include "os/x11/event_queue.h"
+#elif LAF_ANDROID
+  #include "os/android/event_queue.h"
 #endif
 
 namespace os {

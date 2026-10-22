@@ -49,6 +49,12 @@ elseif(APPLE)
       osx/window.mm
       gl/gl_context_nsgl.mm)
   endif()
+elseif(ANDROID)
+  # Only the "none" system (os/none/system.cpp, already listed above)
+  # and a generic event queue for now: the Android backend will go in
+  # os/android.
+  list(APPEND LAF_OS_SOURCES
+    android/event_queue.cpp)
 else()
   list(APPEND LAF_OS_SOURCES
     x11/dnd.cpp
@@ -65,7 +71,8 @@ endif()
 ######################################################################
 # Skia backend
 
-if(LAF_BACKEND STREQUAL "skia")
+# TODO there is no os::SkiaSystem for Android yet (see os/common/system.cpp)
+if(LAF_BACKEND STREQUAL "skia" AND NOT ANDROID)
   if(APPLE)
     add_definitions(-Wno-c++14-extensions)
   endif()
@@ -131,6 +138,8 @@ elseif(APPLE)
     -Werror=inconsistent-missing-override
     # Use Automatic Reference Counting
     -fobjc-arc)
+elseif(ANDROID)
+  # Nothing yet (no X11 here)
 else()
   find_package(Threads REQUIRED)
   list(APPEND LAF_OS_PLATFORM_LIBS ${CMAKE_THREAD_LIBS_INIT})

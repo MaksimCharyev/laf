@@ -46,7 +46,7 @@ SystemRef System::make()
   ASSERT(!g_instance);
 
   SystemRef ref;
-#if LAF_SKIA
+#if LAF_SKIA && !LAF_ANDROID // TODO there is no os::SkiaSystem for Android yet
   ref = System::makeSkia();
 #endif
 #if LAF_WINDOWS
