@@ -29,6 +29,9 @@
 #elif LAF_LINUX
   #include "os/x11/system.h"
   #define SkiaSystemBase SystemX11
+#elif LAF_ANDROID
+  #include "os/android/system.h"
+  #define SkiaSystemBase SystemAndroid
 #endif
 
 #include "include/core/SkGraphics.h"
@@ -46,6 +49,13 @@ public:
 
   Capabilities capabilities() const override
   {
+#if LAF_ANDROID
+    // One full-screen window that the app cannot resize, no mouse
+    // cursor on a touch screen. (SK_SUPPORT_GPU is always defined on
+    // Android, see cmake/FindSkia.cmake.)
+    return Capabilities(int(Capabilities::WindowScale) | int(Capabilities::ColorSpaces) |
+                        int(Capabilities::GpuAccelerationSwitch));
+#endif
     return Capabilities(int(Capabilities::MultipleWindows) | int(Capabilities::CanResizeWindow) |
                         int(Capabilities::WindowScale) | int(Capabilities::CustomMouseCursor) |
                         int(Capabilities::ColorSpaces)

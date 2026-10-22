@@ -24,6 +24,11 @@ using SkiaWindowPlatform = os::SkiaWindowOSX;
 namespace os {
 using SkiaWindowPlatform = os::SkiaWindowX11;
 }
+#elif LAF_ANDROID
+  #include "os/skia/skia_window_android.h"
+namespace os {
+using SkiaWindowPlatform = os::SkiaWindowAndroid;
+}
 #endif
 
 #include "os/native_cursor.h"

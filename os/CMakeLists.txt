@@ -50,11 +50,17 @@ elseif(APPLE)
       gl/gl_context_nsgl.mm)
   endif()
 elseif(ANDROID)
-  # Only the "none" system (os/none/system.cpp, already listed above)
-  # and a generic event queue for now: the Android backend will go in
-  # os/android.
+  # The entry point is android_main() (android/main.cpp), called by
+  # the GameActivity glue, instead of main().
+  list(REMOVE_ITEM LAF_OS_SOURCES common/main.cpp)
   list(APPEND LAF_OS_SOURCES
-    android/event_queue.cpp)
+    android/app.cpp
+    android/event_queue.cpp
+    android/jni.cpp
+    android/main.cpp
+    android/screen.cpp
+    android/system.cpp
+    android/window.cpp)
 else()
   list(APPEND LAF_OS_SOURCES
     x11/dnd.cpp
@@ -71,8 +77,7 @@ endif()
 ######################################################################
 # Skia backend
 
-# TODO there is no os::SkiaSystem for Android yet (see os/common/system.cpp)
-if(LAF_BACKEND STREQUAL "skia" AND NOT ANDROID)
+if(LAF_BACKEND STREQUAL "skia")
   if(APPLE)
     add_definitions(-Wno-c++14-extensions)
   endif()
@@ -88,6 +93,9 @@ if(LAF_BACKEND STREQUAL "skia" AND NOT ANDROID)
   elseif(APPLE)
     list(APPEND LAF_OS_SOURCES
       skia/skia_window_osx.mm)
+  elseif(ANDROID)
+    list(APPEND LAF_OS_SOURCES
+      skia/skia_window_android.cpp)
   else()
     list(APPEND LAF_OS_SOURCES
       skia/skia_window_x11.cpp)
@@ -139,7 +147,46 @@ elseif(APPLE)
     # Use Automatic Reference Counting
     -fobjc-arc)
 elseif(ANDROID)
-  # Nothing yet (no X11 here)
+  # GameActivity (ADR 0001) is linked as the prefab static library
+  # "game-activity::game-activity_static" of androidx.games:games-activity.
+  # Under Gradle (prefab enabled) the target comes from
+  # find_package(game-activity CONFIG). Outside Gradle, point
+  # LAF_ANDROID_GAMEACTIVITY_DIR to the "prefab" directory of the
+  # games-activity AAR (e.g. extracted by Gradle in
+  # ~/.gradle/caches/<version>/transforms/<hash>/transformed/games-activity-<version>/prefab).
+  set(LAF_ANDROID_GAMEACTIVITY_DIR "" CACHE PATH
+    "Prefab directory of androidx.games:games-activity (used if the game-activity package is not found)")
+  if(NOT TARGET game-activity::game-activity_static)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+      find_package(game-activity CONFIG QUIET GLOBAL)
+    else()
+      find_package(game-activity CONFIG QUIET)
+    endif()
+  endif()
+  if(NOT TARGET game-activity::game-activity_static)
+    set(_gameactivity_module "${LAF_ANDROID_GAMEACTIVITY_DIR}/modules/game-activity_static")
+    set(_gameactivity_lib "${_gameactivity_module}/libs/android.${ANDROID_ABI}/libgame-activity_static.a")
+    if(NOT LAF_ANDROID_GAMEACTIVITY_DIR OR NOT EXISTS "${_gameactivity_lib}")
+      message(FATAL_ERROR "GameActivity not found: build with Gradle (prefab) or set "
+        "LAF_ANDROID_GAMEACTIVITY_DIR to the games-activity prefab directory "
+        "(${_gameactivity_lib} doesn't exist)")
+    endif()
+    add_library(game-activity::game-activity_static STATIC IMPORTED GLOBAL)
+    set_target_properties(game-activity::game-activity_static PROPERTIES
+      IMPORTED_LOCATION "${_gameactivity_lib}"
+      INTERFACE_INCLUDE_DIRECTORIES "${_gameactivity_module}/include")
+  endif()
+
+  list(APPEND LAF_OS_PLATFORM_LIBS
+    game-activity::game-activity_static
+    android
+    log)
+
+  # The JNI entry point of GameActivity is only referenced from Java,
+  # keep it (and the glue that calls our android_main()) in the final
+  # shared library.
+  target_link_options(laf-os INTERFACE
+    "-Wl,-u,Java_com_google_androidgamesdk_GameActivity_initializeNativeCode")
 else()
   find_package(Threads REQUIRED)
   list(APPEND LAF_OS_PLATFORM_LIBS ${CMAKE_THREAD_LIBS_INIT})

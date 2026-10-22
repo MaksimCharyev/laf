@@ -8,32 +8,44 @@
 #define OS_ANDROID_EVENT_QUEUE_INCLUDED
 #pragma once
 
+#include "base/concurrent_queue.h"
 #include "os/event.h"
 #include "os/event_queue.h"
 
-#include <condition_variable>
-#include <deque>
-#include <mutex>
+#include <atomic>
+
+struct ALooper;
 
 namespace os {
 
-// Thread-safe queue of events. The Android event loop (which will
-// live in the same thread that calls getEvent()) or other threads
-// can queue events at any time.
+// Event queue driven by the ALooper of the GameActivity glue thread
+// (the thread that runs android_main() and app_main()).
 //
-// TODO when os/android lands, getEvent() must also poll the ALooper
-//      (or be woken up with ALooper_wake()), otherwise blocking here
-//      would stall the looper and the app would get an ANR.
+// getEvent() returns queued events first; if there are none, it waits
+// in ALooper_pollOnce() up to the given timeout and processes the
+// APP_CMD_* commands and input buffers of the glue (see
+// AppAndroid::pollLooper()), which can queue new events.
+//
+// queueEvent() can be called from any thread: if the glue thread is
+// waiting in the looper, it's woken up with ALooper_wake().
 class EventQueueAndroid : public EventQueue {
 public:
+  EventQueueAndroid();
+
   void queueEvent(const Event& ev) override;
   void getEvent(Event& ev, double timeout) override;
   void clearEvents() override;
 
+  bool isEmpty() const { return m_events.empty(); }
+
+  // Looper of the glue thread, set by AppAndroid (nullptr when
+  // android_main() finishes).
+  void setLooper(ALooper* looper);
+
 private:
-  std::deque<Event> m_events;
-  std::mutex m_mutex;
-  std::condition_variable m_cond;
+  base::concurrent_queue<Event> m_events;
+  std::atomic<ALooper*> m_looper;
+  std::atomic<bool> m_sleeping;
 };
 
 using EventQueueImpl = EventQueueAndroid;
