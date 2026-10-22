@@ -334,9 +334,10 @@ bool DocumentsAndroid::toProvider(const std::string& path, std::string& error)
             int(base::current_tick() - start));
 
   const std::lock_guard lock(m_mutex);
-  if (findByPath(path)) {
-    // Most recently used first.
-    Entry& entry = addEntry(uri, path);
+  if (Entry* found = findByPath(path)) {
+    // Most recently used first (with the registered form of the path).
+    const std::string registeredPath = found->path;
+    Entry& entry = addEntry(uri, registeredPath);
     entry.synced = true;
     saveRegistry();
   }
@@ -571,6 +572,16 @@ DocumentsAndroid::Entry* DocumentsAndroid::findByPath(const std::string& path)
   for (Entry& entry : m_entries) {
     if (entry.path == path)
       return &entry;
+  }
+  // The app can give us the same path in other form, e.g. the Export
+  // window joins the sprite folder with a relative path
+  // ("<cache>/documents/A/../B/name.png").
+  const std::string normalized = base::normalize_path(path);
+  if (normalized != path) {
+    for (Entry& entry : m_entries) {
+      if (entry.path == normalized)
+        return &entry;
+    }
   }
   return nullptr;
 }
