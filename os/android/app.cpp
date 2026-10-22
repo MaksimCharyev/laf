@@ -17,6 +17,7 @@
 #include "os/android/jni.h"
 #include "os/android/window.h"
 #include "os/event.h"
+#include "os/system.h"
 
 #include <android/api-level.h>
 #include <android/configuration.h>
@@ -190,6 +191,11 @@ static_assert(M::kMaxPointers == GAMEACTIVITY_MAX_NUM_POINTERS_IN_MOTION_EVENT,
 // Maximum distance between the two taps of a double click, in dp.
 constexpr int kDoubleClickSlopDp = 16;
 
+// Maximum movement of a finger tap (and the movement that starts a
+// two-finger pan/pinch): 10 dp = 25 px at density 400 (ADR 0006
+// section 6 asks for ~24 px).
+constexpr int kTapSlopDp = 10;
+
 void pointer_input_log(const int level, const char* msg)
 {
   if (level > 0)
@@ -240,6 +246,9 @@ const char* event_type_name(const Event::Type type)
     case Event::MouseUp:          return "MouseUp";
     case Event::MouseWheel:       return "MouseWheel";
     case Event::MouseDoubleClick: return "MouseDoubleClick";
+    case Event::KeyDown:          return "KeyDown";
+    case Event::KeyUp:            return "KeyUp";
+    case Event::TouchMagnify:     return "TouchMagnify";
     default:                      return "?";
   }
 }
@@ -247,11 +256,12 @@ const char* event_type_name(const Event::Type type)
 const char* pointer_type_name(const PointerType pointerType)
 {
   switch (pointerType) {
-    case PointerType::Mouse:  return "Mouse";
-    case PointerType::Touch:  return "Touch";
-    case PointerType::Pen:    return "Pen";
-    case PointerType::Eraser: return "Eraser";
-    default:                  return "Unknown";
+    case PointerType::Mouse:    return "Mouse";
+    case PointerType::Touch:    return "Touch";
+    case PointerType::Pen:      return "Pen";
+    case PointerType::Eraser:   return "Eraser";
+    case PointerType::Touchpad: return "Touchpad";
+    default:                    return "Unknown";
   }
 }
 
@@ -599,9 +609,23 @@ void AppAndroid::processInput()
     m_pointerInput.setScale(m_window ? m_window->scale() : 1);
     m_pointerInput.setDoubleClickSlop(m_density > 0 ? (kDoubleClickSlopDp * m_density + 80) / 160 :
                                                       PointerInputAndroid::kDefaultDoubleClickSlop);
+    m_pointerInput.setTapSlop(m_density > 0 ? (kTapSlopDp * m_density + 80) / 160 :
+                                              PointerInputAndroid::kDefaultTapSlop);
+    if (const SystemRef system = System::instance())
+      m_pointerInput.setPenRejectionTimeout(
+        std::clamp(system->tabletOptions().penRejectionTimeout, 0, 2000));
 
     for (uint64_t i = 0; i < ib->motionEventsCount; ++i)
       processMotionEvent(ib->motionEvents[i], now);
+
+    // Pen gesture keys (M-Pencil double-tap = keyCode 718) become
+    // virtual scancodes (kKeyPenDoubleTap) here, before and apart from
+    // the generic key translation, which must skip them
+    // (PointerInputAndroid::isGestureKey()).
+    for (uint64_t i = 0; i < ib->keyEventsCount; ++i) {
+      const GameActivityKeyEvent& ev = ib->keyEvents[i];
+      m_pointerInput.processKey(ev.action, ev.keyCode, ev.repeatCount, now, m_inputEvents);
+    }
 
     // TODO M2.3-M2.4: translate key events into os::Event (ADR 0006
     //      section 11). Until then they are only logged in verbose
@@ -688,7 +712,8 @@ void AppAndroid::queueInputEvents()
 {
   for (Event& ev : m_inputEvents) {
     if (verbose()) {
-      LAF_ALOGV("input: -> %s pos=%d,%d %s button=%d pressure=%.3f wheel=%d,%d",
+      LAF_ALOGV("input: -> %s pos=%d,%d %s button=%d pressure=%.3f wheel=%d,%d "
+                "magnification=%.3f scancode=%d",
                 event_type_name(ev.type()),
                 ev.position().x,
                 ev.position().y,
@@ -696,7 +721,9 @@ void AppAndroid::queueInputEvents()
                 int(ev.button()),
                 ev.pressure(),
                 ev.wheelDelta().x,
-                ev.wheelDelta().y);
+                ev.wheelDelta().y,
+                ev.magnification(),
+                int(ev.scancode()));
     }
     if (m_window)
       m_window->queueEvent(ev);

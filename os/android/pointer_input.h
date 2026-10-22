@@ -13,6 +13,7 @@
 #include "os/event.h"
 #include "os/pointer_type.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -109,15 +110,14 @@ struct MotionEventAndroid {
 };
 
 // Translates Android motion events into os::Event mouse events (ADR
-// 0006 sections 2, 3 and 10, ROADMAP M2.1/M2.2). Pure C++: the caller
-// (AppAndroid::processInput()) converts each GameActivityMotionEvent
-// into a MotionEventAndroid, passes the current time, and queues the
-// returned events.
+// 0006 sections 2-7 and 10, ROADMAP M2.1/M2.2, M3.1, M3.3, M3.4).
+// Pure C++: the caller (AppAndroid::processInput()) converts each
+// GameActivityMotionEvent into a MotionEventAndroid, passes the
+// current time, and queues the returned events.
 //
 // What is emitted:
 // - Only one pointer drives the mouse at a time: the stylus, the
-//   first finger of a touch stream, or a mouse. Extra fingers are
-//   ignored (multi-touch gestures and palm logic are M3).
+//   only finger of a touch stream, or a mouse.
 // - Stylus/eraser: MouseDown/MouseMove/MouseUp with LeftButton,
 //   PointerType::Pen (Eraser for TOOL_TYPE_ERASER) and the pressure.
 //   BUTTON_STYLUS_PRIMARY/SECONDARY at touch down select the
@@ -130,17 +130,34 @@ struct MotionEventAndroid {
 //   just before the stylus DOWN and HOVER_ENTER just after the UP.
 // - The pen is "in range" from the first hover/down until its
 //   MouseLeave is emitted; a finger stream that starts while the pen
-//   is in range is ignored completely (stylus priority), and the pen
-//   entering the range ends the current finger stream.
-// - Finger (TOOL_TYPE_FINGER/UNKNOWN): MouseDown/MouseMove/MouseUp
-//   with LeftButton, PointerType::Touch, pressure 0. No MouseLeave
-//   after the finger lifts (like os/win), so the last position stays
-//   as the mouse position. TOOL_TYPE_PALM ends the finger stream.
+//   is in range or less than penRejectionTimeout() ms after it left
+//   is ignored completely (stylus priority), and the pen entering
+//   the range cancels the current finger stream.
+// - One finger (TOOL_TYPE_FINGER/UNKNOWN): MouseDown/MouseMove/
+//   MouseUp with LeftButton, PointerType::Touch, pressure 0. No
+//   MouseLeave after the finger lifts (like os/win), so the last
+//   position stays as the mouse position.
+// - A second finger cancels the one-finger stroke (see "cancel"
+//   below). With exactly two fingers, once one of them moved more
+//   than tapSlop() pixels, the stream becomes a pan/pinch gesture:
+//   precise MouseWheel events (PointerType::Touchpad, delta = minus
+//   the movement of the fingers' center in scaled pixels) and
+//   TouchMagnify (magnification = distance ratio - 1), both at the
+//   center of the fingers, like os/osx. A third finger or lifting a
+//   finger ends the gesture for the rest of the stream.
+// - Finger taps: a stream with 2 (or 3) fingers at most, all down
+//   within kTapDownWindow ms of the first one, none moved more than
+//   tapSlop() pixels, ended with ACTION_UP within kTapMaxDuration ms
+//   emits KeyDown+KeyUp of kKeyTwoFingerTap (kKeyThreeFingerTap).
+// - Palm: more than kMaxTouchPointers fingers, or TOOL_TYPE_PALM,
+//   cancels the stream and ignores it until the next ACTION_DOWN.
+// - Cancel (ACTION_CANCEL of a stroke, palm, pen arrival, second
+//   finger): if a button is held, KeyUp(kKeyPointerCancel) and then
+//   MouseUp, so the app can discard the stroke. A KeyDown is never
+//   sent (Esc KeyDown would run the Cancel command = deselect).
 // - Mouse: buttons from buttonState, PointerType::Mouse, ACTION_SCROLL
 //   as MouseWheel with delta.y = -AXIS_VSCROLL and delta.x =
 //   +AXIS_HSCROLL (the sign contract of NOTES.md, like os/x11).
-// - ACTION_CANCEL: MouseUp of the held button (placeholder until M3.1,
-//   which cancels the stroke instead).
 // - A MouseMove is always emitted at the position of a MouseDown
 //   before it (ui::Manager picks the target widget from the last
 //   move), and before MouseUp if the position changed.
@@ -163,6 +180,21 @@ public:
   static constexpr base::tick_t kLeaveAfterUpDelay = 150;
   static constexpr base::tick_t kDefaultDoubleClickTime = 300;
   static constexpr int kDefaultDoubleClickSlop = 24;
+  static constexpr base::tick_t kDefaultPenRejectionTimeout = 500;
+
+  // Finger taps (ADR 0006 section 6).
+  static constexpr base::tick_t kTapDownWindow = 150;
+  static constexpr base::tick_t kTapMaxDuration = 300;
+  static constexpr int kDefaultTapSlop = 24;
+  // More fingers than this at the same time is a palm.
+  static constexpr int kMaxTouchPointers = 3;
+
+  // M-Pencil double-tap: AKEYCODE 718 (Huawei specific, scanCode 190
+  // = KEY_F20), sent as two DOWN/UP pairs 6-16 ms apart per
+  // double-tap. DOWNs closer than this to the previous one are
+  // dropped.
+  static constexpr int32_t kPenDoubleTapKeyCode = 718;
+  static constexpr base::tick_t kPenDoubleTapDebounce = 100;
 
   PointerInputAndroid();
 
@@ -174,10 +206,34 @@ public:
   void setDoubleClickSlop(int px) { m_doubleClickSlop = px; }
   void setDoubleClickTime(base::tick_t msecs) { m_doubleClickTime = msecs; }
 
+  // Maximum movement in window pixels of a finger tap; also the
+  // movement needed to start a two-finger pan/pinch.
+  void setTapSlop(int px) { m_tapSlop = px; }
+  int tapSlop() const { return m_tapSlop; }
+
+  // Fingers are ignored this many milliseconds after the pen left
+  // the range (os::TabletOptions::penRejectionTimeout).
+  void setPenRejectionTimeout(base::tick_t msecs) { m_penRejectionTimeout = msecs; }
+  base::tick_t penRejectionTimeout() const { return m_penRejectionTimeout; }
+
   void setLogFunc(LogFunc func) { m_log = func; }
 
   // Translates one motion event, appending the os::Event(s) to "out".
   void processMotion(const MotionEventAndroid& ev, base::tick_t now, std::vector<Event>& out);
+
+  // Key events that are pen gestures, handled by processKey() and
+  // not by the generic key translation.
+  static bool isGestureKey(int32_t keyCode) { return keyCode == kPenDoubleTapKeyCode; }
+
+  // Translates a gesture key (isGestureKey()) into KeyDown+KeyUp of
+  // a virtual scancode (kKeyPenDoubleTap). Returns false if keyCode
+  // is not a gesture key. "action" is AKEY_EVENT_ACTION_DOWN (0) or
+  // AKEY_EVENT_ACTION_UP (1).
+  bool processKey(int32_t action,
+                  int32_t keyCode,
+                  int32_t repeatCount,
+                  base::tick_t now,
+                  std::vector<Event>& out);
 
   // Emits the deferred MouseLeave if its time has come.
   void processTimers(base::tick_t now, std::vector<Event>& out);
@@ -199,14 +255,39 @@ public:
 private:
   enum class Owner { None, Touch, Pen, Mouse };
 
+  // What the current finger stream (ACTION_DOWN..UP/CANCEL) does.
+  enum class TouchMode {
+    None,    // No stream
+    Ignored, // Rejected or ended, ignored until the next ACTION_DOWN
+    Mouse,   // One finger drives the mouse (m_touchPointerId)
+    Multi,   // 2-3 fingers: tap candidate, waiting for movement
+    Gesture, // Two-finger pan/pinch
+  };
+
+  struct TouchStart {
+    int32_t id = -1;
+    float x = 0.0f;
+    float y = 0.0f;
+  };
+
   void processPen(const MotionEventAndroid& ev, base::tick_t now, std::vector<Event>& out);
   void processTouch(const MotionEventAndroid& ev, base::tick_t now, std::vector<Event>& out);
   void processMouse(const MotionEventAndroid& ev, base::tick_t now, std::vector<Event>& out);
 
-  // Ends the current finger stream (if it drives the mouse, releases
-  // the button) and ignores it until the next ACTION_DOWN.
+  // Ends the current finger stream (if it drives the mouse, cancels
+  // the stroke) and ignores it until the next ACTION_DOWN.
   void cancelTouchStream(std::vector<Event>& out, const char* reason);
-  void takeOwnership(Owner owner, std::vector<Event>& out);
+  // KeyUp(kKeyPointerCancel) + MouseUp if a button is held.
+  void cancelButton(std::vector<Event>& out);
+  bool rejectTouch(const MotionPointerAndroid& p, base::tick_t now, const char** reason) const;
+  void addTouchStart(const MotionPointerAndroid& p);
+  // Checks the tap slop for each pointer of "ev".
+  void checkTouchMovement(const MotionEventAndroid& ev);
+  void startTwoFingerGesture(const MotionEventAndroid& ev);
+  void processTwoFingerGesture(const MotionEventAndroid& ev, std::vector<Event>& out);
+  void endTouchStream(base::tick_t now, std::vector<Event>& out);
+  void setPenOutOfRange(base::tick_t now);
+  void takeOwnership(Owner owner, base::tick_t now, std::vector<Event>& out);
   void cancelLeave(base::tick_t now, const char* reason);
   void scheduleLeave(base::tick_t now, base::tick_t delay);
 
@@ -230,12 +311,16 @@ private:
              base::tick_t now,
              std::vector<Event>& out);
   void release(float x, float y, std::vector<Event>& out);
+  // KeyUp of a virtual scancode, preceded by a KeyDown if withKeyDown.
+  void pushKey(KeyScancode scancode, bool withKeyDown, std::vector<Event>& out) const;
 
   void log(int level, const char* fmt, ...) const;
 
   int m_scale = 1;
   int m_doubleClickSlop = kDefaultDoubleClickSlop;
   base::tick_t m_doubleClickTime = kDefaultDoubleClickTime;
+  int m_tapSlop = kDefaultTapSlop;
+  base::tick_t m_penRejectionTimeout = kDefaultPenRejectionTimeout;
   LogFunc m_log = nullptr;
 
   Owner m_owner = Owner::None;
@@ -248,12 +333,31 @@ private:
   base::tick_t m_leaveTime = 0;     // When the deferred MouseLeave is emitted (0 = none)
   base::tick_t m_hoverExitTime = 0; // Last HOVER_EXIT (for the order log)
   bool m_hoverOrderLogged = false;
+  base::tick_t m_penLeftTime = 0; // When the pen left the range (0 = never)
 
   // Finger stream (ACTION_DOWN..ACTION_UP/CANCEL)
-  bool m_touchStream = false;
-  bool m_touchIgnored = false;
+  TouchMode m_touchMode = TouchMode::None;
   int32_t m_touchPointerId = -1; // Finger that drives the mouse (-1 = none)
   bool m_touchIgnoredLogged = false;
+  base::tick_t m_touchStartTime = 0;
+  int m_touchMaxPointers = 0;
+  bool m_tapCandidate = false; // No movement/late finger/cancel yet
+  bool m_touchMoved = false;   // A finger moved more than the tap slop
+  bool m_gestureAllowed = false;
+  std::array<TouchStart, MotionEventAndroid::kMaxPointers> m_touchStarts;
+  int m_touchStartCount = 0;
+
+  // Two-finger gesture: pointer ids and the last center/distance
+  // used for the emitted events (window pixels).
+  int32_t m_gestureIds[2] = { -1, -1 };
+  float m_gestureX = 0.0f;
+  float m_gestureY = 0.0f;
+  float m_gestureDistance = 0.0f;
+  float m_panX = 0.0f; // Wheel fractions (scaled pixels)
+  float m_panY = 0.0f;
+
+  // Pen double-tap key
+  base::tick_t m_penKeyTime = 0; // Last DOWN of the key (0 = none)
 
   // Last emitted position
   gfx::Point m_lastPx;

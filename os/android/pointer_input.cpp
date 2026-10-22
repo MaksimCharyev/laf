@@ -68,6 +68,9 @@ int find_pointer_id(const MotionEventAndroid& ev, const int32_t id)
   return -1;
 }
 
+// AKEY_EVENT_ACTION_DOWN/UP
+constexpr int32_t kKeyActionDown = 0;
+
 } // anonymous namespace
 
 PointerInputAndroid::PointerInputAndroid()
@@ -101,7 +104,7 @@ void PointerInputAndroid::processTimers(const base::tick_t now, std::vector<Even
 
   m_leaveTime = 0;
   if (m_owner == Owner::Pen)
-    m_penInRange = false;
+    setPenOutOfRange(now);
 
   if ((m_owner == Owner::Pen || m_owner == Owner::Mouse) && m_button == Event::NoneButton) {
     if (m_inside) {
@@ -113,6 +116,33 @@ void PointerInputAndroid::processTimers(const base::tick_t now, std::vector<Even
     log(0, "input: pointer left (deferred MouseLeave emitted)");
     m_owner = Owner::None;
   }
+}
+
+bool PointerInputAndroid::processKey(const int32_t action,
+                                     const int32_t keyCode,
+                                     const int32_t repeatCount,
+                                     const base::tick_t now,
+                                     std::vector<Event>& out)
+{
+  if (!isGestureKey(keyCode))
+    return false;
+
+  // Each double-tap arrives as two DOWN/UP pairs a few ms apart: only
+  // the first DOWN of a burst is the gesture, UPs and repeats are
+  // dropped (ADR 0006 section 6).
+  if (action != kKeyActionDown || repeatCount > 0)
+    return true;
+
+  const bool burst = (m_penKeyTime && now - m_penKeyTime < kPenDoubleTapDebounce);
+  m_penKeyTime = std::max<base::tick_t>(now, 1);
+  if (burst) {
+    log(0, "input: pen double-tap key %d repeated, dropped", int(keyCode));
+    return true;
+  }
+
+  log(1, "input: pen double-tap");
+  pushKey(kKeyPenDoubleTap, true, out);
+  return true;
 }
 
 int PointerInputAndroid::nextTimeout(const base::tick_t now) const
@@ -136,8 +166,7 @@ void PointerInputAndroid::reset(std::vector<Event>& out)
   m_owner = Owner::None;
   m_penInRange = false;
   m_leaveTime = 0;
-  m_touchStream = false;
-  m_touchIgnored = false;
+  m_touchMode = TouchMode::None;
   m_touchPointerId = -1;
   m_hasLastPos = false;
   m_clickButton = Event::NoneButton;
@@ -157,7 +186,7 @@ void PointerInputAndroid::processPen(const MotionEventAndroid& ev,
     case M::kActionHoverEnter:
     case M::kActionHoverMove:
       cancelLeave(now, "HOVER_ENTER/MOVE");
-      takeOwnership(Owner::Pen, out);
+      takeOwnership(Owner::Pen, now, out);
       // A hover event means the tip is not touching: release a button
       // if we missed the UP.
       if (m_button != Event::NoneButton)
@@ -185,7 +214,7 @@ void PointerInputAndroid::processPen(const MotionEventAndroid& ev,
         m_hoverOrderLogged = true;
       }
       cancelLeave(now, "DOWN");
-      takeOwnership(Owner::Pen, out);
+      takeOwnership(Owner::Pen, now, out);
       m_penInRange = true;
       ensureInside(p.x, p.y, pointerType, out);
       press(p, stylus_button(ev.buttonState), pointerType, true, now, out);
@@ -214,10 +243,9 @@ void PointerInputAndroid::processPen(const MotionEventAndroid& ev,
 
     case M::kActionCancel:
       if (m_owner == Owner::Pen) {
-        // TODO M3.1 cancel the stroke instead of committing it
         if (m_button != Event::NoneButton) {
-          log(1, "input: pen ACTION_CANCEL, MouseUp sent (stroke is kept until M3.1)");
-          release(float(m_lastPx.x), float(m_lastPx.y), out);
+          log(1, "input: pen ACTION_CANCEL, stroke cancelled");
+          cancelButton(out);
         }
         scheduleLeave(now, kLeaveAfterUpDelay);
       }
@@ -236,44 +264,42 @@ void PointerInputAndroid::processTouch(const MotionEventAndroid& ev,
 {
   const int action = ev.actionMasked();
   const int index = ev.actionIndex();
+  const bool active = (m_touchMode != TouchMode::None && m_touchMode != TouchMode::Ignored);
 
   // GameActivity copies 8 pointers at most: the pointer that went
-  // down/up might not be in the event (ADR 0006 section 10).
+  // down/up might not be in the event (ADR 0006 section 10). So many
+  // pointers are a palm anyway.
   if ((action == M::kActionDown || action == M::kActionUp || action == M::kActionPointerDown ||
        action == M::kActionPointerUp) &&
       index >= ev.pointerCount) {
     log(0, "input: action pointer index %d >= pointer count %d, skipped", index, ev.pointerCount);
-    if (action == M::kActionUp) {
-      cancelTouchStream(out, "lost ACTION_UP pointer");
-      m_touchStream = false;
-      m_touchIgnored = false;
-    }
+    if (active)
+      cancelTouchStream(out, "palm (pointer limit)");
+    if (action == M::kActionUp)
+      m_touchMode = TouchMode::None;
+    return;
+  }
+
+  // Palm: too many fingers at the same time (ADR 0006 section 4.5).
+  if (active && ev.pointerCount > kMaxTouchPointers) {
+    cancelTouchStream(out, "palm (too many fingers)");
+    if (action == M::kActionUp || action == M::kActionCancel)
+      m_touchMode = TouchMode::None;
     return;
   }
 
   switch (action) {
     case M::kActionDown: {
       // A new stream. If the previous one didn't end (lost UP),
-      // release its button first.
-      if (m_touchStream)
+      // cancel its stroke first.
+      if (active)
         cancelTouchStream(out, "new ACTION_DOWN");
-      m_touchStream = true;
-      m_touchIgnored = false;
+      m_touchMode = TouchMode::Ignored;
       m_touchPointerId = -1;
 
       const MotionPointerAndroid& p = ev.pointers[index];
       const char* reason = nullptr;
-      if (p.toolType == M::kToolPalm)
-        reason = "palm";
-      else if (m_penInRange)
-        reason = "pen in range";
-      else if (m_owner == Owner::Pen && m_button != Event::NoneButton)
-        reason = "pen touching";
-      else if (m_owner == Owner::Mouse && m_button != Event::NoneButton)
-        reason = "mouse button pressed";
-
-      if (reason) {
-        m_touchIgnored = true;
+      if (rejectTouch(p, now, &reason)) {
         if (!m_touchIgnoredLogged) {
           log(1, "input: finger stream ignored (%s), logged once", reason);
           m_touchIgnoredLogged = true;
@@ -284,58 +310,126 @@ void PointerInputAndroid::processTouch(const MotionEventAndroid& ev,
         break;
       }
 
-      takeOwnership(Owner::Touch, out);
+      m_touchMode = TouchMode::Mouse;
+      m_touchStartTime = now;
+      m_touchMaxPointers = 1;
+      m_tapCandidate = true;
+      m_touchMoved = false;
+      m_gestureAllowed = false;
+      m_touchStartCount = 0;
+      addTouchStart(p);
+
+      takeOwnership(Owner::Touch, now, out);
       m_touchPointerId = p.id;
       ensureInside(p.x, p.y, PointerType::Touch, out);
       press(p, Event::LeftButton, PointerType::Touch, false, now, out);
       break;
     }
 
-    case M::kActionPointerDown:
-      // TODO M3 two-finger gestures, palm (more than 3 pointers)
-      if (ev.pointers[index].toolType == M::kToolPalm)
-        cancelTouchStream(out, "palm pointer");
-      break;
-
-    case M::kActionMove: {
-      if (m_touchIgnored || m_owner != Owner::Touch || m_touchPointerId < 0)
+    case M::kActionPointerDown: {
+      if (!active)
         break;
-      const int i = find_pointer_id(ev, m_touchPointerId);
-      if (i >= 0)
-        moveWithHistory(ev, i, PointerType::Touch, false, out);
+      const MotionPointerAndroid& p = ev.pointers[index];
+      if (p.toolType == M::kToolPalm) {
+        cancelTouchStream(out, "palm pointer");
+        break;
+      }
+
+      addTouchStart(p);
+      m_touchMaxPointers = std::max(m_touchMaxPointers, ev.pointerCount);
+      if (now - m_touchStartTime > kTapDownWindow)
+        m_tapCandidate = false;
+
+      // A second finger: the one-finger stroke/scroll is discarded,
+      // the stream is now a tap or a two-finger gesture.
+      if (m_touchMode == TouchMode::Mouse) {
+        if (m_button != Event::NoneButton) {
+          log(0, "input: second finger, one-finger stroke cancelled");
+          cancelButton(out);
+        }
+        m_touchPointerId = -1;
+        m_touchMode = TouchMode::Multi;
+      }
+
+      if (ev.pointerCount == 2 && m_touchMaxPointers == 2) {
+        startTwoFingerGesture(ev);
+      }
+      else {
+        // A third finger ends the gesture (3-finger tap or palm).
+        if (m_touchMode == TouchMode::Gesture)
+          log(0, "input: two-finger gesture ended (third finger)");
+        m_touchMode = TouchMode::Multi;
+        m_gestureAllowed = false;
+      }
       break;
     }
 
+    case M::kActionMove:
+      if (!active)
+        break;
+      checkTouchMovement(ev);
+
+      if (m_touchMode == TouchMode::Mouse) {
+        const int i = find_pointer_id(ev, m_touchPointerId);
+        if (i >= 0)
+          moveWithHistory(ev, i, PointerType::Touch, false, out);
+      }
+      else if (m_touchMode == TouchMode::Multi) {
+        if (m_gestureAllowed && m_touchMoved && ev.pointerCount == 2) {
+          log(0, "input: two-finger gesture started");
+          m_touchMode = TouchMode::Gesture;
+          m_tapCandidate = false;
+          // The wheel/magnify events go to the widget under the
+          // fingers.
+          const float cx = m_gestureX;
+          const float cy = m_gestureY;
+          MotionPointerAndroid c;
+          c.x = cx;
+          c.y = cy;
+          ensureInside(cx, cy, PointerType::Touch, out);
+          move(c, PointerType::Touch, false, true, out);
+          processTwoFingerGesture(ev, out);
+        }
+      }
+      else if (m_touchMode == TouchMode::Gesture) {
+        processTwoFingerGesture(ev, out);
+      }
+      break;
+
     case M::kActionPointerUp:
-      // The finger that drives the mouse is lifted while others stay:
-      // release the button and ignore the rest of the stream (to
-      // avoid jumps to the other finger).
-      if (!m_touchIgnored && m_owner == Owner::Touch && ev.pointers[index].id == m_touchPointerId) {
-        const MotionPointerAndroid& p = ev.pointers[index];
-        moveWithHistory(ev, index, PointerType::Touch, false, out);
-        release(p.x, p.y, out);
-        m_touchPointerId = -1;
-        m_touchIgnored = true;
+      if (!active)
+        break;
+      checkTouchMovement(ev);
+      // Lifting one of two fingers ends the gesture; the remaining
+      // finger doesn't draw or pan.
+      if (m_touchMode == TouchMode::Gesture)
+        log(0, "input: two-finger gesture ended (finger lifted)");
+      if (m_touchMode == TouchMode::Gesture || m_touchMode == TouchMode::Multi) {
+        m_touchMode = TouchMode::Multi;
+        m_gestureAllowed = false;
       }
       break;
 
     case M::kActionUp:
-      if (!m_touchIgnored && m_owner == Owner::Touch && m_touchPointerId >= 0) {
-        const int i = find_pointer_id(ev, m_touchPointerId);
-        const MotionPointerAndroid& p = ev.pointers[i >= 0 ? i : index];
-        moveWithHistory(ev, i >= 0 ? i : index, PointerType::Touch, false, out);
-        release(p.x, p.y, out);
+      if (active) {
+        checkTouchMovement(ev);
+        if (m_touchMode == TouchMode::Mouse && m_touchPointerId >= 0) {
+          const int i = find_pointer_id(ev, m_touchPointerId);
+          const MotionPointerAndroid& p = ev.pointers[i >= 0 ? i : index];
+          moveWithHistory(ev, i >= 0 ? i : index, PointerType::Touch, false, out);
+          release(p.x, p.y, out);
+        }
+        endTouchStream(now, out);
       }
-      m_touchStream = false;
-      m_touchIgnored = false;
+      m_touchMode = TouchMode::None;
       m_touchPointerId = -1;
       break;
 
     case M::kActionCancel:
-      // TODO M3.1 cancel the stroke instead of committing it
-      cancelTouchStream(out, "ACTION_CANCEL");
-      m_touchStream = false;
-      m_touchIgnored = false;
+      // The system rejected the stream (palm, ADR 0006 section 4.3).
+      if (active)
+        cancelTouchStream(out, "ACTION_CANCEL");
+      m_touchMode = TouchMode::None;
       break;
 
     default:
@@ -343,6 +437,139 @@ void PointerInputAndroid::processTouch(const MotionEventAndroid& ev,
       log(0, "input: finger action %d ignored", action);
       break;
   }
+}
+
+bool PointerInputAndroid::rejectTouch(const MotionPointerAndroid& p,
+                                      const base::tick_t now,
+                                      const char** reason) const
+{
+  if (p.toolType == M::kToolPalm)
+    *reason = "palm";
+  else if (m_penInRange)
+    *reason = "pen in range";
+  else if (m_owner == Owner::Pen && m_button != Event::NoneButton)
+    *reason = "pen touching";
+  else if (m_penLeftTime && now - m_penLeftTime < m_penRejectionTimeout)
+    *reason = "pen left the range recently";
+  else if (m_owner == Owner::Mouse && m_button != Event::NoneButton)
+    *reason = "mouse button pressed";
+  else
+    return false;
+  return true;
+}
+
+void PointerInputAndroid::addTouchStart(const MotionPointerAndroid& p)
+{
+  for (int i = 0; i < m_touchStartCount; ++i) {
+    if (m_touchStarts[i].id == p.id) {
+      m_touchStarts[i].x = p.x;
+      m_touchStarts[i].y = p.y;
+      return;
+    }
+  }
+  if (m_touchStartCount < int(m_touchStarts.size())) {
+    TouchStart& t = m_touchStarts[m_touchStartCount++];
+    t.id = p.id;
+    t.x = p.x;
+    t.y = p.y;
+  }
+}
+
+void PointerInputAndroid::checkTouchMovement(const MotionEventAndroid& ev)
+{
+  if (m_touchMoved)
+    return;
+
+  for (int i = 0; i < ev.pointerCount; ++i) {
+    const MotionPointerAndroid& p = ev.pointers[i];
+    for (int j = 0; j < m_touchStartCount; ++j) {
+      const TouchStart& t = m_touchStarts[j];
+      if (t.id == p.id &&
+          (std::abs(p.x - t.x) > float(m_tapSlop) || std::abs(p.y - t.y) > float(m_tapSlop))) {
+        m_touchMoved = true;
+        m_tapCandidate = false;
+        return;
+      }
+    }
+  }
+}
+
+void PointerInputAndroid::startTwoFingerGesture(const MotionEventAndroid& ev)
+{
+  // The center and distance when the second finger lands are the
+  // reference, so the movement before the gesture starts (up to the
+  // tap slop) is not lost.
+  const MotionPointerAndroid& a = ev.pointers[0];
+  const MotionPointerAndroid& b = ev.pointers[1];
+  m_gestureIds[0] = a.id;
+  m_gestureIds[1] = b.id;
+  m_gestureX = (a.x + b.x) / 2.0f;
+  m_gestureY = (a.y + b.y) / 2.0f;
+  m_gestureDistance = std::hypot(b.x - a.x, b.y - a.y);
+  m_panX = m_panY = 0.0f;
+  m_gestureAllowed = true;
+}
+
+void PointerInputAndroid::processTwoFingerGesture(const MotionEventAndroid& ev,
+                                                  std::vector<Event>& out)
+{
+  const int ia = find_pointer_id(ev, m_gestureIds[0]);
+  const int ib = find_pointer_id(ev, m_gestureIds[1]);
+  if (ia < 0 || ib < 0)
+    return;
+
+  const MotionPointerAndroid& a = ev.pointers[ia];
+  const MotionPointerAndroid& b = ev.pointers[ib];
+  const float cx = (a.x + b.x) / 2.0f;
+  const float cy = (a.y + b.y) / 2.0f;
+  const float distance = std::hypot(b.x - a.x, b.y - a.y);
+
+  // Pinch: zoom around the center (StateWithWheelBehavior::
+  // onTouchMagnify() multiplies the scale by 1 + magnification).
+  // Tiny changes are accumulated until they are noticeable.
+  if (m_gestureDistance >= 1.0f && distance >= 1.0f) {
+    const float magnification = distance / m_gestureDistance - 1.0f;
+    if (std::abs(magnification) >= 0.005f) {
+      Event mag = makeEvent(Event::TouchMagnify, cx, cy, PointerType::Touchpad, 0.0f);
+      mag.setMagnification(magnification);
+      out.push_back(mag);
+      m_gestureDistance = distance;
+    }
+  }
+  else {
+    m_gestureDistance = distance;
+  }
+
+  // Pan: the content follows the fingers, i.e. the scroll position
+  // moves the other way (a precise wheel adds its delta to the
+  // scroll, ui::View and the editor).
+  m_panX -= (cx - m_gestureX) / float(m_scale);
+  m_panY -= (cy - m_gestureY) / float(m_scale);
+  m_gestureX = cx;
+  m_gestureY = cy;
+
+  const int dx = int(m_panX);
+  const int dy = int(m_panY);
+  if (dx != 0 || dy != 0) {
+    m_panX -= float(dx);
+    m_panY -= float(dy);
+    Event wheel = makeEvent(Event::MouseWheel, cx, cy, PointerType::Touchpad, 0.0f);
+    wheel.setWheelDelta(gfx::Point(dx, dy));
+    wheel.setPreciseWheel(true);
+    out.push_back(wheel);
+  }
+}
+
+void PointerInputAndroid::endTouchStream(const base::tick_t now, std::vector<Event>& out)
+{
+  // Finger taps (ADR 0006 section 6).
+  if (m_tapCandidate && now - m_touchStartTime <= kTapMaxDuration &&
+      (m_touchMaxPointers == 2 || m_touchMaxPointers == 3)) {
+    log(1, "input: %d-finger tap", m_touchMaxPointers);
+    pushKey(m_touchMaxPointers == 2 ? kKeyTwoFingerTap : kKeyThreeFingerTap, true, out);
+  }
+  m_tapCandidate = false;
+  m_gestureAllowed = false;
 }
 
 void PointerInputAndroid::processMouse(const MotionEventAndroid& ev,
@@ -355,7 +582,7 @@ void PointerInputAndroid::processMouse(const MotionEventAndroid& ev,
     case M::kActionHoverEnter:
     case M::kActionHoverMove:
       cancelLeave(now, "mouse HOVER_ENTER/MOVE");
-      takeOwnership(Owner::Mouse, out);
+      takeOwnership(Owner::Mouse, now, out);
       if (m_button != Event::NoneButton)
         release(p.x, p.y, out);
       ensureInside(p.x, p.y, PointerType::Mouse, out);
@@ -371,7 +598,7 @@ void PointerInputAndroid::processMouse(const MotionEventAndroid& ev,
       if (m_owner == Owner::Mouse && m_button != Event::NoneButton)
         break;
       cancelLeave(now, "mouse DOWN");
-      takeOwnership(Owner::Mouse, out);
+      takeOwnership(Owner::Mouse, now, out);
       ensureInside(p.x, p.y, PointerType::Mouse, out);
       press(p, mouse_button(ev.buttonState), PointerType::Mouse, false, now, out);
       break;
@@ -402,7 +629,7 @@ void PointerInputAndroid::processMouse(const MotionEventAndroid& ev,
       m_scrollX -= float(dx);
       m_scrollY -= float(dy);
 
-      takeOwnership(Owner::Mouse, out);
+      takeOwnership(Owner::Mouse, now, out);
       ensureInside(p.x, p.y, PointerType::Mouse, out);
       Event wheel = makeEvent(Event::MouseWheel, p.x, p.y, PointerType::Mouse, 0.0f);
       wheel.setWheelDelta(gfx::Point(dx, dy));
@@ -421,19 +648,39 @@ void PointerInputAndroid::processMouse(const MotionEventAndroid& ev,
 void PointerInputAndroid::cancelTouchStream(std::vector<Event>& out, const char* reason)
 {
   if (m_owner == Owner::Touch && m_button != Event::NoneButton) {
-    // TODO M3.1 KeyUp(kKeyPointerCancel) before the MouseUp so the
-    //      stroke is discarded
-    log(1, "input: finger stream ended (%s), MouseUp sent", reason);
-    release(float(m_lastPx.x), float(m_lastPx.y), out);
+    log(1, "input: finger stream cancelled (%s), stroke cancelled", reason);
+    cancelButton(out);
   }
-  else if (m_touchStream && !m_touchIgnored) {
-    log(0, "input: finger stream ended (%s)", reason);
+  else if (m_touchMode != TouchMode::None && m_touchMode != TouchMode::Ignored) {
+    log(m_touchMode == TouchMode::Gesture ? 1 : 0, "input: finger stream cancelled (%s)", reason);
   }
-  m_touchIgnored = true;
+  m_touchMode = TouchMode::Ignored;
   m_touchPointerId = -1;
+  m_tapCandidate = false;
+  m_gestureAllowed = false;
 }
 
-void PointerInputAndroid::takeOwnership(const Owner owner, std::vector<Event>& out)
+void PointerInputAndroid::cancelButton(std::vector<Event>& out)
+{
+  if (m_button == Event::NoneButton)
+    return;
+
+  // The app discards the stroke on this KeyUp (DrawingState treats it
+  // like Esc), so the MouseUp that follows doesn't commit it.
+  pushKey(kKeyPointerCancel, false, out);
+  release(float(m_lastPx.x), float(m_lastPx.y), out);
+}
+
+void PointerInputAndroid::setPenOutOfRange(const base::tick_t now)
+{
+  if (m_penInRange)
+    m_penLeftTime = std::max<base::tick_t>(now, 1);
+  m_penInRange = false;
+}
+
+void PointerInputAndroid::takeOwnership(const Owner owner,
+                                        const base::tick_t now,
+                                        std::vector<Event>& out)
 {
   if (m_owner == owner)
     return;
@@ -446,7 +693,7 @@ void PointerInputAndroid::takeOwnership(const Owner owner, std::vector<Event>& o
     release(float(m_lastPx.x), float(m_lastPx.y), out);
 
   if (m_owner == Owner::Pen)
-    m_penInRange = false;
+    setPenOutOfRange(now);
 
   m_owner = owner;
   m_hasLastPos = false;
@@ -590,6 +837,20 @@ void PointerInputAndroid::release(const float x, const float y, std::vector<Even
   ev.setButton(m_button);
   out.push_back(ev);
   m_button = Event::NoneButton;
+}
+
+void PointerInputAndroid::pushKey(const KeyScancode scancode,
+                                  const bool withKeyDown,
+                                  std::vector<Event>& out) const
+{
+  Event ev;
+  ev.setScancode(scancode);
+  if (withKeyDown) {
+    ev.setType(Event::KeyDown);
+    out.push_back(ev);
+  }
+  ev.setType(Event::KeyUp);
+  out.push_back(ev);
 }
 
 void PointerInputAndroid::log(const int level, const char* fmt, ...) const
