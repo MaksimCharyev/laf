@@ -4,7 +4,12 @@
 add_custom_target(laf-examples)
 
 function(laf_add_example name console="")
-  if("${console}" STREQUAL "CONSOLE")
+  if(ANDROID)
+    # Android apps are shared libraries loaded by the activity, the
+    # entry point is android_main() in laf-os (os/android/main.cpp).
+    add_library(${name} SHARED ${name}.cpp)
+    target_link_options(${name} PRIVATE "-Wl,--no-undefined")
+  elseif("${console}" STREQUAL "CONSOLE")
     add_executable(${name} ${name}.cpp)
   else()
     add_executable(${name} WIN32 ${name}.cpp)
