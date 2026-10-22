@@ -14,6 +14,8 @@
 
 #include <string>
 
+class SkPixmap;
+
 namespace os {
 
 class SkiaWindowAndroid : public SkiaWindowBase<WindowAndroid> {
@@ -25,6 +27,17 @@ public:
 
 private:
   void onPaint(const gfx::Rect& rc) override;
+  void onNativeWindowAttached() override;
+  void onNativeWindowDetached() override;
+
+  void resetRasterState();
+  void logColorProbe(const SkPixmap& dst);
+
+  // State of the raster path for the current ANativeWindow.
+  bool m_buffersReady = false; // ANativeWindow_setBuffersGeometry() done
+  bool m_buffersFailed = false;
+  bool m_lockFailed = false;
+  bool m_firstPaint = true;
 
   DISABLE_COPYING(SkiaWindowAndroid);
 };
