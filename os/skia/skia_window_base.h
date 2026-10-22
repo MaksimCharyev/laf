@@ -87,22 +87,29 @@ public:
     m_surface.reset();
 
 #if SK_SUPPORT_GPU
-    // Detach and re-create OpenGL context
-    detachGpuContext();
+    if (keepGpuContextOnResize() && m_preferGpuAcceleration) {
+      // Keep the GL context and the GrDirectContext, only the render
+      // target is created again.
+      createGpuRenderTarget(size);
+    }
+    else {
+      // Detach and re-create OpenGL context
+      detachGpuContext();
 
-    // GPU-accelerated surface
-    if (m_glCtx && m_preferGpuAcceleration) {
-      m_glCtx->createGLContext();
+      // GPU-accelerated surface
+      if (m_glCtx && m_preferGpuAcceleration) {
+        m_glCtx->createGLContext();
 
-      if (m_glCtx->isValid()) {
-        m_glCtx->makeCurrent();
+        if (m_glCtx->isValid()) {
+          m_glCtx->makeCurrent();
 
-        if (m_gl.attachGL() &&
-            m_gl.createRenderTarget(size,
-                                    this->scale(),
-                                    ((SkiaColorSpace*)colorSpace().get())->skColorSpace())) {
-          m_surface = make_ref<SkiaSurface>(m_gl.surface());
-          m_backend = Backend::GL;
+          if (m_gl.attachGL() &&
+              m_gl.createRenderTarget(size,
+                                      this->scale(),
+                                      ((SkiaColorSpace*)colorSpace().get())->skColorSpace())) {
+            m_surface = make_ref<SkiaSurface>(m_gl.surface());
+            m_backend = Backend::GL;
+          }
         }
       }
     }
@@ -236,12 +243,47 @@ protected:
   Backend backend() const { return m_backend; }
 
 #if SK_SUPPORT_GPU
+  // Returns true if the platform keeps its GL context (and Skia's
+  // GrDirectContext) when the window is resized or its GPU surface
+  // is created again (Android). In that case
+  // m_glCtx->createGLContext() is called on each resize: it must
+  // create only what is missing and return true if there is a
+  // surface to draw into. By default the whole GL context is
+  // destroyed and created again.
+  virtual bool keepGpuContextOnResize() const { return false; }
+
   std::unique_ptr<GLContext> m_glCtx;
   SkiaGL m_gl;
 #endif
 
 private:
 #if SK_SUPPORT_GPU
+  // Used instead of re-creating the GL context when
+  // keepGpuContextOnResize() is true.
+  void createGpuRenderTarget(const gfx::Size& size)
+  {
+    if (!m_glCtx || !m_glCtx->createGLContext())
+      return;
+
+    m_glCtx->makeCurrent();
+
+    const bool newGrCtx = !m_gl.hasCtx();
+    if (!m_gl.attachGL())
+      return;
+
+    // The GL state cached by Skia (bound framebuffer, viewport, etc.)
+    // can be invalid for the new surface.
+    if (!newGrCtx)
+      m_gl.grCtx()->resetContext();
+
+    if (m_gl.createRenderTarget(size,
+                                this->scale(),
+                                ((SkiaColorSpace*)colorSpace().get())->skColorSpace())) {
+      m_surface = make_ref<SkiaSurface>(m_gl.surface());
+      m_backend = Backend::GL;
+    }
+  }
+
   void detachGpuContext()
   {
     m_gl.detachGL();

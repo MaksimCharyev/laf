@@ -30,7 +30,7 @@ class WindowSpec;
 // should not create them, there is no Capabilities::MultipleWindows)
 // are never visible.
 //
-// Plan for the GPU path (M1.6, see NOTES.md): EGLDisplay, EGLContext
+// GPU path (SkiaWindowAndroid, GLContextEGL): EGLDisplay, EGLContext
 // and the GrDirectContext are created once and survive TERM_WINDOW.
 // onNativeWindowDetached() only flushes Skia, releases the SkSurface
 // wrapping the framebuffer, makes the context current without a
@@ -38,6 +38,10 @@ class WindowSpec;
 // onNativeWindowAttached() creates a new EGLSurface for the new
 // ANativeWindow and wraps it again. Full recreation only on
 // EGL_CONTEXT_LOST.
+//
+// Each new ANativeWindow gets a high refresh rate vote
+// (ANativeWindow_setFrameRate(), "debug.laf.frame_rate", 144 by
+// default), otherwise HarmonyOS runs the panel at 60 Hz.
 class WindowAndroid : public Window {
 public:
   WindowAndroid(const WindowSpec& spec);
