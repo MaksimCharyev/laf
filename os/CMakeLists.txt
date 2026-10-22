@@ -58,6 +58,7 @@ elseif(ANDROID)
     android/event_queue.cpp
     android/jni.cpp
     android/main.cpp
+    android/pointer_input.cpp
     android/screen.cpp
     android/system.cpp
     android/window.cpp)
@@ -234,4 +235,11 @@ mark_as_advanced(LAF_BACKEND_LINK_FLAGS)
 
 if(LAF_WITH_TESTS)
   laf_find_tests(. laf-os)
+
+  # The Android pointer translation is pure C++, so it's tested on
+  # the host too (tests are not built for Android).
+  if(NOT ANDROID)
+    laf_find_tests(android laf-os)
+    target_sources(pointer_input_tests PRIVATE android/pointer_input.cpp)
+  endif()
 endif()

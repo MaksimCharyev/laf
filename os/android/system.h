@@ -28,8 +28,9 @@ public:
   void resetKeyPressed() override {}
   int getUnicodeFromScancode(KeyScancode scancode) override { return 0; }
 
-  // TODO M2.1 last pointer position
-  gfx::Point mousePosition() const override { return m_mousePosition; }
+  // Last position of the pen/finger/mouse (window pixels, the window
+  // is at the screen origin).
+  gfx::Point mousePosition() const override;
 
   // Android apps cannot move the pointer.
   void setMousePosition(const gfx::Point& screenPosition) override {}
@@ -39,7 +40,6 @@ public:
 
 private:
   TabletOptions m_tabletOptions;
-  gfx::Point m_mousePosition;
 };
 
 } // namespace os

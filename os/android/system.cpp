@@ -10,6 +10,7 @@
 
 #include "os/android/system.h"
 
+#include "os/android/app.h"
 #include "os/android/screen.h"
 
 namespace os {
@@ -17,6 +18,13 @@ namespace os {
 SystemAndroid::~SystemAndroid()
 {
   destroyInstance();
+}
+
+gfx::Point SystemAndroid::mousePosition() const
+{
+  if (AppAndroid* app = AppAndroid::instance())
+    return app->mousePosition();
+  return gfx::Point(0, 0);
 }
 
 ScreenRef SystemAndroid::primaryScreen()

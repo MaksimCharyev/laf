@@ -20,6 +20,7 @@
 
 #include <android/api-level.h>
 #include <android/configuration.h>
+#include <android/input.h>
 #include <android/keycodes.h>
 #include <android/native_window.h>
 #include <sys/stat.h>
@@ -142,6 +143,129 @@ bool key_event_filter(const GameActivityKeyEvent* ev)
 bool motion_event_filter(const GameActivityMotionEvent*)
 {
   return true;
+}
+
+// MotionEventAndroid (os/android/pointer_input.h) doesn't include the
+// NDK headers, so its constants are checked here.
+using M = MotionEventAndroid;
+static_assert(M::kActionMask == AMOTION_EVENT_ACTION_MASK &&
+                M::kActionPointerIndexMask == AMOTION_EVENT_ACTION_POINTER_INDEX_MASK &&
+                M::kActionPointerIndexShift == AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT,
+              "Action masks");
+static_assert(M::kActionDown == AMOTION_EVENT_ACTION_DOWN &&
+                M::kActionUp == AMOTION_EVENT_ACTION_UP &&
+                M::kActionMove == AMOTION_EVENT_ACTION_MOVE &&
+                M::kActionCancel == AMOTION_EVENT_ACTION_CANCEL &&
+                M::kActionOutside == AMOTION_EVENT_ACTION_OUTSIDE &&
+                M::kActionPointerDown == AMOTION_EVENT_ACTION_POINTER_DOWN &&
+                M::kActionPointerUp == AMOTION_EVENT_ACTION_POINTER_UP &&
+                M::kActionHoverMove == AMOTION_EVENT_ACTION_HOVER_MOVE &&
+                M::kActionScroll == AMOTION_EVENT_ACTION_SCROLL &&
+                M::kActionHoverEnter == AMOTION_EVENT_ACTION_HOVER_ENTER &&
+                M::kActionHoverExit == AMOTION_EVENT_ACTION_HOVER_EXIT &&
+                M::kActionButtonPress == AMOTION_EVENT_ACTION_BUTTON_PRESS &&
+                M::kActionButtonRelease == AMOTION_EVENT_ACTION_BUTTON_RELEASE,
+              "Actions");
+static_assert(M::kToolUnknown == AMOTION_EVENT_TOOL_TYPE_UNKNOWN &&
+                M::kToolFinger == AMOTION_EVENT_TOOL_TYPE_FINGER &&
+                M::kToolStylus == AMOTION_EVENT_TOOL_TYPE_STYLUS &&
+                M::kToolMouse == AMOTION_EVENT_TOOL_TYPE_MOUSE &&
+                M::kToolEraser == AMOTION_EVENT_TOOL_TYPE_ERASER &&
+                M::kToolPalm == AMOTION_EVENT_TOOL_TYPE_PALM,
+              "Tool types");
+static_assert(M::kButtonPrimary == AMOTION_EVENT_BUTTON_PRIMARY &&
+                M::kButtonSecondary == AMOTION_EVENT_BUTTON_SECONDARY &&
+                M::kButtonTertiary == AMOTION_EVENT_BUTTON_TERTIARY &&
+                M::kButtonBack == AMOTION_EVENT_BUTTON_BACK &&
+                M::kButtonForward == AMOTION_EVENT_BUTTON_FORWARD &&
+                M::kButtonStylusPrimary == AMOTION_EVENT_BUTTON_STYLUS_PRIMARY &&
+                M::kButtonStylusSecondary == AMOTION_EVENT_BUTTON_STYLUS_SECONDARY,
+              "Buttons");
+static_assert(M::kSourceClassPointer == AINPUT_SOURCE_CLASS_POINTER &&
+                M::kSourceMouse == AINPUT_SOURCE_MOUSE,
+              "Sources");
+static_assert(M::kMaxPointers == GAMEACTIVITY_MAX_NUM_POINTERS_IN_MOTION_EVENT,
+              "GAMEACTIVITY_MAX_NUM_POINTERS_IN_MOTION_EVENT must not be overridden");
+
+// Maximum distance between the two taps of a double click, in dp.
+constexpr int kDoubleClickSlopDp = 16;
+
+void pointer_input_log(const int level, const char* msg)
+{
+  if (level > 0)
+    LAF_ALOGI("%s", msg);
+  else
+    LAF_ALOGV("%s", msg);
+}
+
+const char* motion_action_name(const int action)
+{
+  switch (action) {
+    case AMOTION_EVENT_ACTION_DOWN:           return "DOWN";
+    case AMOTION_EVENT_ACTION_UP:             return "UP";
+    case AMOTION_EVENT_ACTION_MOVE:           return "MOVE";
+    case AMOTION_EVENT_ACTION_CANCEL:         return "CANCEL";
+    case AMOTION_EVENT_ACTION_OUTSIDE:        return "OUTSIDE";
+    case AMOTION_EVENT_ACTION_POINTER_DOWN:   return "POINTER_DOWN";
+    case AMOTION_EVENT_ACTION_POINTER_UP:     return "POINTER_UP";
+    case AMOTION_EVENT_ACTION_HOVER_MOVE:     return "HOVER_MOVE";
+    case AMOTION_EVENT_ACTION_SCROLL:         return "SCROLL";
+    case AMOTION_EVENT_ACTION_HOVER_ENTER:    return "HOVER_ENTER";
+    case AMOTION_EVENT_ACTION_HOVER_EXIT:     return "HOVER_EXIT";
+    case AMOTION_EVENT_ACTION_BUTTON_PRESS:   return "BUTTON_PRESS";
+    case AMOTION_EVENT_ACTION_BUTTON_RELEASE: return "BUTTON_RELEASE";
+  }
+  return "?";
+}
+
+const char* tool_type_name(const int32_t toolType)
+{
+  switch (toolType) {
+    case AMOTION_EVENT_TOOL_TYPE_FINGER: return "finger";
+    case AMOTION_EVENT_TOOL_TYPE_STYLUS: return "stylus";
+    case AMOTION_EVENT_TOOL_TYPE_MOUSE:  return "mouse";
+    case AMOTION_EVENT_TOOL_TYPE_ERASER: return "eraser";
+    case AMOTION_EVENT_TOOL_TYPE_PALM:   return "palm";
+  }
+  return "unknown";
+}
+
+const char* event_type_name(const Event::Type type)
+{
+  switch (type) {
+    case Event::MouseEnter:       return "MouseEnter";
+    case Event::MouseLeave:       return "MouseLeave";
+    case Event::MouseMove:        return "MouseMove";
+    case Event::MouseDown:        return "MouseDown";
+    case Event::MouseUp:          return "MouseUp";
+    case Event::MouseWheel:       return "MouseWheel";
+    case Event::MouseDoubleClick: return "MouseDoubleClick";
+    default:                      return "?";
+  }
+}
+
+const char* pointer_type_name(const PointerType pointerType)
+{
+  switch (pointerType) {
+    case PointerType::Mouse:  return "Mouse";
+    case PointerType::Touch:  return "Touch";
+    case PointerType::Pen:    return "Pen";
+    case PointerType::Eraser: return "Eraser";
+    default:                  return "Unknown";
+  }
+}
+
+MotionPointerAndroid pointer_from_axes(const GameActivityPointerAxes& axes)
+{
+  MotionPointerAndroid p;
+  p.id = axes.id;
+  p.toolType = axes.toolType;
+  p.x = GameActivityPointerAxes_getX(&axes);
+  p.y = GameActivityPointerAxes_getY(&axes);
+  p.pressure = GameActivityPointerAxes_getPressure(&axes);
+  p.tilt = GameActivityPointerAxes_getAxisValue(&axes, AMOTION_EVENT_AXIS_TILT);
+  p.orientation = GameActivityPointerAxes_getOrientation(&axes);
+  return p;
 }
 
 const char* app_cmd_name(const int32_t cmd)
@@ -270,8 +394,13 @@ void AppAndroid::setupInput()
   GameActivityPointerAxes_enableAxis(AMOTION_EVENT_AXIS_ORIENTATION);
   GameActivityPointerAxes_enableAxis(AMOTION_EVENT_AXIS_TOUCH_MAJOR);
   GameActivityPointerAxes_enableAxis(AMOTION_EVENT_AXIS_TOUCH_MINOR);
+  GameActivityPointerAxes_enableAxis(AMOTION_EVENT_AXIS_VSCROLL);
+  GameActivityPointerAxes_enableAxis(AMOTION_EVENT_AXIS_HSCROLL);
 
-  LAF_ALOGI("android_main: input filters installed (all motion sources, system keys excluded)");
+  m_pointerInput.setLogFunc(pointer_input_log);
+
+  LAF_ALOGI("android_main: input filters installed (all motion sources, system keys excluded), "
+            "pen/finger/mouse -> mouse events (ADR 0006)");
 }
 
 gfx::Size AppAndroid::screenSize() const
@@ -306,7 +435,7 @@ void AppAndroid::setWindow(WindowAndroid* window)
 
 void AppAndroid::pollLooper(int timeoutMs)
 {
-  for (int ms = timeoutMs;; ms = 0) {
+  for (int ms = waitTimeout(timeoutMs);; ms = 0) {
     int events = 0;
     android_poll_source* source = nullptr;
     const int id = ALooper_pollOnce(ms, nullptr, &events, (void**)&source);
@@ -409,6 +538,9 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
     case APP_CMD_PAUSE: {
       LAF_ALOGI("APP_CMD_PAUSE");
       m_resumed = false;
+      // The input stream ends here (no UP will arrive), release the
+      // button/mouse so the UI doesn't keep a capture.
+      resetInput("APP_CMD_PAUSE");
       Event ev;
       ev.setType(Event::AppLeave);
       queue_event(ev);
@@ -459,40 +591,136 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
 
 void AppAndroid::processInput()
 {
-  android_input_buffer* ib = android_app_swap_input_buffers(m_app);
-  if (!ib)
-    return;
+  const base::tick_t now = base::current_tick();
 
-  // TODO M2.1-M2.3: translate motion/key events into os::Event (ADR
-  //      0006). Until then they are only logged in verbose mode and
-  //      dropped. Wheel/scroll deltas must use the sign convention of
-  //      the X11/Windows backends (wheel up = negative y, wheel right =
-  //      positive x, see get_mouse_wheel_delta() in os/x11/window.cpp),
-  //      i.e. delta.y = -AXIS_VSCROLL and delta.x = +AXIS_HSCROLL; the
-  //      app relies on it (state_with_wheel_behavior.cpp under
-  //      LAF_ANDROID).
-  if (verbose()) {
-    for (uint64_t i = 0; i < ib->motionEventsCount; ++i) {
-      const GameActivityMotionEvent& ev = ib->motionEvents[i];
-      LAF_ALOGV("motion: action=0x%x source=0x%x pointers=%u tool=%d history=%d",
-                ev.action,
-                ev.source,
-                ev.pointerCount,
-                (ev.pointerCount > 0 ? ev.pointers[0].toolType : -1),
-                ev.historySize);
+  android_input_buffer* ib = android_app_swap_input_buffers(m_app);
+  if (ib) {
+    // Window scale and density can change at any time.
+    m_pointerInput.setScale(m_window ? m_window->scale() : 1);
+    m_pointerInput.setDoubleClickSlop(m_density > 0 ? (kDoubleClickSlopDp * m_density + 80) / 160 :
+                                                      PointerInputAndroid::kDefaultDoubleClickSlop);
+
+    for (uint64_t i = 0; i < ib->motionEventsCount; ++i)
+      processMotionEvent(ib->motionEvents[i], now);
+
+    // TODO M2.3-M2.4: translate key events into os::Event (ADR 0006
+    //      section 11). Until then they are only logged in verbose
+    //      mode and dropped.
+    if (verbose()) {
+      for (uint64_t i = 0; i < ib->keyEventsCount; ++i) {
+        const GameActivityKeyEvent& ev = ib->keyEvents[i];
+        LAF_ALOGV("key: action=%d keyCode=%d scanCode=%d repeat=%d",
+                  ev.action,
+                  ev.keyCode,
+                  ev.scanCode,
+                  ev.repeatCount);
+      }
     }
-    for (uint64_t i = 0; i < ib->keyEventsCount; ++i) {
-      const GameActivityKeyEvent& ev = ib->keyEvents[i];
-      LAF_ALOGV("key: action=%d keyCode=%d scanCode=%d repeat=%d",
-                ev.action,
-                ev.keyCode,
-                ev.scanCode,
-                ev.repeatCount);
+
+    android_app_clear_motion_events(ib);
+    android_app_clear_key_events(ib);
+  }
+
+  // Deferred MouseLeave (pen hover exit, ADR 0006 section 3).
+  m_pointerInput.processTimers(now, m_inputEvents);
+  queueInputEvents();
+}
+
+void AppAndroid::processMotionEvent(const GameActivityMotionEvent& ev, const base::tick_t now)
+{
+  // GameActivity copies at most 8 pointers (ADR 0006 section 10).
+  const int pointerCount = std::min<int>(int(ev.pointerCount),
+                                         GAMEACTIVITY_MAX_NUM_POINTERS_IN_MOTION_EVENT);
+  const int historySize = (ev.historicalAxisValues ? std::max(0, ev.historySize) : 0);
+
+  MotionEventAndroid& m = m_motion;
+  m.action = ev.action;
+  m.source = ev.source;
+  m.buttonState = ev.buttonState;
+  m.pointerCount = pointerCount;
+  for (int p = 0; p < pointerCount; ++p)
+    m.pointers[p] = pointer_from_axes(ev.pointers[p]);
+
+  m.historySize = historySize;
+  m.history.resize(size_t(historySize) * pointerCount);
+  for (int h = 0; h < historySize; ++h) {
+    for (int p = 0; p < pointerCount; ++p) {
+      MotionPointerAndroid& hp = m.history[h * pointerCount + p];
+      hp = m.pointers[p];
+      hp.x = GameActivityMotionEvent_getHistoricalX(&ev, p, h);
+      hp.y = GameActivityMotionEvent_getHistoricalY(&ev, p, h);
+      hp.pressure = GameActivityMotionEvent_getHistoricalPressure(&ev, p, h);
+      hp.tilt = GameActivityMotionEvent_getHistoricalAxisValue(&ev, AMOTION_EVENT_AXIS_TILT, p, h);
+      hp.orientation = GameActivityMotionEvent_getHistoricalOrientation(&ev, p, h);
     }
   }
 
-  android_app_clear_motion_events(ib);
-  android_app_clear_key_events(ib);
+  m.vscroll = m.hscroll = 0.0f;
+  if (pointerCount > 0) {
+    m.vscroll = GameActivityPointerAxes_getAxisValue(&ev.pointers[0], AMOTION_EVENT_AXIS_VSCROLL);
+    m.hscroll = GameActivityPointerAxes_getAxisValue(&ev.pointers[0], AMOTION_EVENT_AXIS_HSCROLL);
+  }
+
+  if (verbose()) {
+    const int action = ev.action & AMOTION_EVENT_ACTION_MASK;
+    const MotionPointerAndroid* p = (pointerCount > 0 ? &m.pointers[0] : nullptr);
+    LAF_ALOGV("input: motion %s index=%d source=0x%x pointers=%u history=%d buttons=0x%x "
+              "[0] id=%d %s x=%.1f y=%.1f pressure=%.3f tilt=%.2f orientation=%.2f",
+              motion_action_name(action),
+              int(m.actionIndex()),
+              ev.source,
+              ev.pointerCount,
+              ev.historySize,
+              ev.buttonState,
+              (p ? p->id : -1),
+              (p ? tool_type_name(p->toolType) : "-"),
+              (p ? p->x : 0.0f),
+              (p ? p->y : 0.0f),
+              (p ? p->pressure : 0.0f),
+              (p ? p->tilt : 0.0f),
+              (p ? p->orientation : 0.0f));
+  }
+
+  m_pointerInput.processMotion(m, now, m_inputEvents);
+}
+
+void AppAndroid::queueInputEvents()
+{
+  for (Event& ev : m_inputEvents) {
+    if (verbose()) {
+      LAF_ALOGV("input: -> %s pos=%d,%d %s button=%d pressure=%.3f wheel=%d,%d",
+                event_type_name(ev.type()),
+                ev.position().x,
+                ev.position().y,
+                pointer_type_name(ev.pointerType()),
+                int(ev.button()),
+                ev.pressure(),
+                ev.wheelDelta().x,
+                ev.wheelDelta().y);
+    }
+    if (m_window)
+      m_window->queueEvent(ev);
+    else
+      queue_event(ev);
+  }
+  m_inputEvents.clear();
+}
+
+void AppAndroid::resetInput(const char* reason)
+{
+  m_pointerInput.reset(m_inputEvents);
+  if (!m_inputEvents.empty())
+    LAF_ALOGV("input: reset (%s)", reason);
+  queueInputEvents();
+}
+
+int AppAndroid::waitTimeout(const int timeoutMs) const
+{
+  // Wake up for the deferred MouseLeave (processTimers()).
+  const int timer = m_pointerInput.nextTimeout(base::current_tick());
+  if (timer >= 0 && (timeoutMs < 0 || timer < timeoutMs))
+    return timer;
+  return timeoutMs;
 }
 
 void AppAndroid::refreshConfiguration(const char* reason, const bool startup)

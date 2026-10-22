@@ -9,13 +9,16 @@
 #pragma once
 
 #include "gfx/border.h"
+#include "gfx/point.h"
 #include "gfx/size.h"
+#include "os/android/pointer_input.h"
 
 #include <android/log.h>
 #include <game-activity/native_app_glue/android_native_app_glue.h>
 #include <jni.h>
 
 #include <string>
+#include <vector>
 
 // All os/android messages go to logcat with the "laf" tag (the same
 // tag used by base/log.cpp), so "adb logcat -s laf:V" shows them.
@@ -74,6 +77,10 @@ public:
   // axes that GameActivity doesn't report by default (ADR 0006).
   void setupInput();
 
+  // Last position of the pointer that drives the mouse, in window
+  // pixels (see System::mousePosition()).
+  gfx::Point mousePosition() const { return m_pointerInput.lastPosition(); }
+
   // Density in dpi (from AConfiguration, refreshed on
   // APP_CMD_CONFIG_CHANGED).
   int density() const { return m_density; }
@@ -121,6 +128,10 @@ private:
   static void onAppCmd(::android_app* app, int32_t cmd);
   void handleAppCmd(int32_t cmd);
   void processInput();
+  void processMotionEvent(const GameActivityMotionEvent& ev, base::tick_t now);
+  void queueInputEvents();
+  void resetInput(const char* reason);
+  int waitTimeout(int timeoutMs) const;
   void refreshConfiguration(const char* reason, bool startup);
   bool refreshSafeArea(const char* reason);
   void updateWindowSizeAndSafeArea(const char* reason);
@@ -141,6 +152,11 @@ private:
   gfx::Size m_screenSizeDp; // At startup only
   mutable gfx::Size m_lastWindowSize;
   gfx::Border m_safeArea = gfx::Border(-1); // Invalid until the first refreshSafeArea()
+
+  // Translation of motion events into mouse events (ADR 0006).
+  PointerInputAndroid m_pointerInput;
+  MotionEventAndroid m_motion;      // Reused for each motion event
+  std::vector<Event> m_inputEvents; // Output of m_pointerInput
 
   // JNI cache (global references), see os/android/jni.h.
   jclass m_activityClass = nullptr;
