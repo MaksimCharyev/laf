@@ -51,21 +51,24 @@ public:
   {
 #if LAF_ANDROID
     // One full-screen window that the app cannot resize, no mouse
-    // cursor on a touch screen. (SK_SUPPORT_GPU is always defined on
-    // Android, see cmake/FindSkia.cmake.)
-    return Capabilities(int(Capabilities::WindowScale) | int(Capabilities::ColorSpaces) |
-                        int(Capabilities::GpuAccelerationSwitch));
-#endif
+    // cursor on a touch screen.
+    return Capabilities(int(Capabilities::WindowScale) | int(Capabilities::ColorSpaces)
+  #if SK_SUPPORT_GPU
+                        | int(Capabilities::GpuAccelerationSwitch)
+  #endif
+    );
+#else
     return Capabilities(int(Capabilities::MultipleWindows) | int(Capabilities::CanResizeWindow) |
                         int(Capabilities::WindowScale) | int(Capabilities::CustomMouseCursor) |
                         int(Capabilities::ColorSpaces)
-#ifndef __APPLE__
+  #ifndef __APPLE__
                         | int(Capabilities::CanStartWindowResize)
-#endif
-#if SK_SUPPORT_GPU
+  #endif
+  #if SK_SUPPORT_GPU
                         | int(Capabilities::GpuAccelerationSwitch)
-#endif
+  #endif
     );
+#endif
   }
 
   void setTabletOptions(const TabletOptions& options) override
