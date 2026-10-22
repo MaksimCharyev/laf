@@ -7,7 +7,13 @@ set(SKIA_DIR "" CACHE PATH "Skia source code directory")
 if(NOT SKIA_DIR)
   set(SKIA_LIBRARY_DIR "" CACHE PATH "Skia library directory (where libskia.a is located)")
 else()
-  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  if(ANDROID)
+    # Only arm64 Skia builds for Android are supported
+    if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
+      message(FATAL_ERROR "Skia for Android is only supported for ANDROID_ABI=arm64-v8a")
+    endif()
+    set(SKIA_ARCH "arm64")
+  elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(SKIA_ARCH "x64")
     if(APPLE)
       if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR
@@ -26,12 +32,24 @@ else()
   endif()
 endif()
 
+if(ANDROID)
+  # The NDK toolchain file restricts find_library() to the sysroot
+  # (CMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY), but Skia libraries are
+  # outside of it. It's restored at the end of this file.
+  set(_SKIA_FIND_ROOT_PATH_MODE_LIBRARY ${CMAKE_FIND_ROOT_PATH_MODE_LIBRARY})
+  set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
+endif()
+
 # Skia library
 find_library(SKIA_LIBRARY skia PATH "${SKIA_LIBRARY_DIR}")
 if(WIN32)
   find_library(SKIA_OPENGL_LIBRARY opengl32)
 elseif(APPLE)
   find_library(SKIA_OPENGL_LIBRARY OpenGL NAMES GL)
+elseif(ANDROID)
+  # OpenGL ES 2+ through EGL (both are part of the NDK sysroot)
+  find_library(SKIA_OPENGL_LIBRARY GLESv2 ONLY_CMAKE_FIND_ROOT_PATH REQUIRED)
+  find_library(SKIA_EGL_LIBRARY EGL ONLY_CMAKE_FIND_ROOT_PATH REQUIRED)
 else()
   find_library(SKIA_OPENGL_LIBRARY opengl NAMES GL)
 endif()
@@ -115,6 +133,14 @@ if(UNIX AND NOT APPLE AND EXISTS "${SKIA_LIBRARY_DIR}/args.gn")
   endif ()
 endif()
 
+# The zlib-project below is a host build (the toolchain file is not
+# forwarded to it), so on Android we use the zlib from the NDK sysroot
+# (FreeType in Skia calls the plain inflate*() functions).
+if(ANDROID AND NOT ZLIB_LIBRARIES)
+  find_library(ZLIB_LIBRARY z ONLY_CMAKE_FIND_ROOT_PATH REQUIRED)
+  set(ZLIB_LIBRARIES ${ZLIB_LIBRARY})
+endif()
+
 # We require zlib because freetype expects to be linked with zlib
 if(NOT ZLIB_LIBRARIES)
   if(UNIX)
@@ -184,6 +210,7 @@ set(HARFBUZZ_INCLUDE_DIRS "${SKIA_DIR}/third_party/externals/harfbuzz/src")
 set(SKIA_LIBRARIES
   ${SKIA_LIBRARY}
   ${SKIA_OPENGL_LIBRARY}
+  ${SKIA_EGL_LIBRARY}
   CACHE INTERNAL "Skia libraries")
 
 add_library(skia INTERFACE)
@@ -215,6 +242,9 @@ if(WIN32)
 elseif(APPLE)
   target_compile_definitions(skia INTERFACE
     SK_BUILD_FOR_MAC)
+elseif(ANDROID)
+  target_compile_definitions(skia INTERFACE
+    SK_BUILD_FOR_ANDROID)
 else()
   target_compile_definitions(skia INTERFACE
     SK_BUILD_FOR_UNIX)
@@ -226,7 +256,26 @@ if(APPLE)
     ${COCOA_LIBRARY})
 endif()
 
-if(UNIX AND NOT APPLE)
+if(ANDROID)
+  # Skia is RGBA on Android (no SK_R32_SHIFT=16), SkFontMgr_Android
+  # doesn't need fontconfig, and Skia's static dependencies are
+  # linked here because the final shared library needs all of them.
+  #
+  # Skia's libpng calls the Chromium-prefixed Cr_z_*() functions.
+  find_library(SKIA_ZLIB_LIBRARY zlib PATHS "${SKIA_LIBRARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  find_library(EXPAT_LIBRARY expat PATHS "${SKIA_LIBRARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  find_library(WEBP_LIBRARY webp PATHS "${SKIA_LIBRARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  find_library(JPEG_LIBRARY jpeg PATHS "${SKIA_LIBRARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  target_link_libraries(skia INTERFACE
+    ${SKIA_ZLIB_LIBRARY}
+    ${EXPAT_LIBRARY}
+    ${WEBP_LIBRARY}
+    ${JPEG_LIBRARY}
+    log
+    android)
+endif()
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
   # Change the kN32_SkColorType ordering to BGRA to work in X windows.
   target_compile_definitions(skia INTERFACE
     SK_R32_SHIFT=16)
@@ -235,7 +284,9 @@ if(UNIX AND NOT APPLE)
   find_library(FONTCONFIG_LIBRARY fontconfig)
   target_link_libraries(skia INTERFACE
     ${FONTCONFIG_LIBRARY})
+endif()
 
+if(UNIX AND NOT APPLE)
   # Options to ignore order of libraries in linking process
   target_link_options(skia BEFORE INTERFACE -Wl,--start-group)
   target_link_libraries(skia INTERFACE -Wl,--end-group)
@@ -268,3 +319,8 @@ add_custom_command(
 add_custom_target(skia_copy_icudata
   DEPENDS ${SKIA_ICUDATA_FILE_OUTPUT})
 add_dependencies(skunicode skia_copy_icudata)
+
+if(ANDROID)
+  set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ${_SKIA_FIND_ROOT_PATH_MODE_LIBRARY})
+  unset(_SKIA_FIND_ROOT_PATH_MODE_LIBRARY)
+endif()
