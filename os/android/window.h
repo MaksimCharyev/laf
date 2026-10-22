@@ -38,6 +38,10 @@ class WindowSpec;
 // onNativeWindowAttached() creates a new EGLSurface for the new
 // ANativeWindow and wraps it again. Full recreation only on
 // EGL_CONTEXT_LOST.
+//
+// Each new ANativeWindow gets a high refresh rate vote
+// (ANativeWindow_setFrameRate(), "debug.laf.frame_rate", 144 by
+// default), otherwise HarmonyOS runs the panel at 60 Hz.
 class WindowAndroid : public Window {
 public:
   WindowAndroid(const WindowSpec& spec);

@@ -17,10 +17,76 @@
 #include "os/window_spec.h"
 
 #include <android/native_window.h>
+#include <dlfcn.h>
+#include <sys/system_properties.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace os {
+
+namespace {
+
+// Refresh rate requested for the window surface. HarmonyOS drops the
+// panel to 60 Hz when the app renders on demand; this vote tells
+// SurfaceFlinger that the content wants a high rate while it's
+// updating (the system ignores it when the app is in background or
+// idle). "debug.laf.frame_rate" overrides it (0 = don't ask):
+//
+//   adb shell setprop debug.laf.frame_rate 120   (then restart the app)
+//
+constexpr float kDefaultFrameRate = 144.0f;
+
+float frame_rate_property()
+{
+  static const float value = []() -> float {
+    char value[PROP_VALUE_MAX] = { 0 };
+    if (__system_property_get("debug.laf.frame_rate", value) <= 0)
+      return kDefaultFrameRate;
+    const float fps = std::strtof(value, nullptr);
+    return (fps >= 0.0f && fps <= 1000.0f ? fps : kDefaultFrameRate);
+  }();
+  return value;
+}
+
+// ANativeWindow_setFrameRate() is API 30+ and minSdk is 29, so it's
+// loaded at runtime.
+using SetFrameRateFn = int32_t (*)(ANativeWindow*, float, int8_t);
+
+SetFrameRateFn set_frame_rate_fn()
+{
+  static const SetFrameRateFn fn = []() -> SetFrameRateFn {
+    void* lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib)
+      return nullptr;
+    return reinterpret_cast<SetFrameRateFn>(dlsym(lib, "ANativeWindow_setFrameRate"));
+  }();
+  return fn;
+}
+
+// Called for each new ANativeWindow (the vote belongs to the surface).
+void request_frame_rate(ANativeWindow* window)
+{
+  const float fps = frame_rate_property();
+  if (fps <= 0.0f) {
+    LAF_ALOGI("Frame rate: not requested (debug.laf.frame_rate=0)");
+    return;
+  }
+
+  SetFrameRateFn fn = set_frame_rate_fn();
+  if (!fn) {
+    LAF_ALOGW("Frame rate: ANativeWindow_setFrameRate() not available (API < 30)");
+    return;
+  }
+
+  const int32_t res = fn(window, fps, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
+  if (res == 0)
+    LAF_ALOGI("Frame rate: ANativeWindow_setFrameRate(%.0f) requested", fps);
+  else
+    LAF_ALOGW("Frame rate: ANativeWindow_setFrameRate(%.0f) failed (%d)", fps, int(res));
+}
+
+} // anonymous namespace
 
 WindowAndroid::WindowAndroid(const WindowSpec& spec)
   : m_scale(AppAndroid::debugScale() ? AppAndroid::debugScale() : std::max(1, spec.scale()))
@@ -165,8 +231,10 @@ void WindowAndroid::setNativeWindow(ANativeWindow* nativeWindow)
 
   m_nativeWindow = nativeWindow;
 
-  if (m_nativeWindow)
+  if (m_nativeWindow) {
     ANativeWindow_acquire(m_nativeWindow);
+    request_frame_rate(m_nativeWindow);
+  }
 }
 
 bool WindowAndroid::readNativeWindowSize()
