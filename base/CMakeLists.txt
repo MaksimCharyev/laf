@@ -123,8 +123,9 @@ else()
     target_compile_definitions(laf-base PUBLIC LAF_MACOS)
     target_link_libraries(laf-base ${FOUNDATION_LIBRARY})
   elseif(ANDROID)
-    # Bionic has pthread in libc
+    # Bionic has pthread in libc, and logging goes through liblog
     target_compile_definitions(laf-base PUBLIC LAF_ANDROID)
+    target_link_libraries(laf-base log)
   else()
     target_compile_definitions(laf-base PUBLIC LAF_LINUX)
     target_link_libraries(laf-base pthread)

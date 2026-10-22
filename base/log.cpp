@@ -13,6 +13,10 @@
   #include <windows.h>
 #endif
 
+#if LAF_ANDROID
+  #include <android/log.h>
+#endif
+
 #include "base/log.h"
 
 #include "base/debug.h"
@@ -67,7 +71,7 @@ LogLevel base::get_log_level()
   return log_level;
 }
 
-static void LOGva(const char* format, va_list ap)
+static void LOGva([[maybe_unused]] const LogLevel level, const char* format, va_list ap)
 {
   va_list apTmp;
   va_copy(apTmp, ap);
@@ -85,6 +89,20 @@ static void LOGva(const char* format, va_list ap)
     log_ostream->write(buf.data(), size);
     log_ostream->flush();
   }
+
+#if LAF_ANDROID
+  // Output to std::cerr isn't visible on Android, so we also send the
+  // message to logcat (adb logcat -s laf).
+  int priority;
+  switch (level) {
+    case FATAL:   priority = ANDROID_LOG_FATAL; break;
+    case ERROR:   priority = ANDROID_LOG_ERROR; break;
+    case WARNING: priority = ANDROID_LOG_WARN; break;
+    case VERBOSE: priority = ANDROID_LOG_VERBOSE; break;
+    default:      priority = ANDROID_LOG_INFO; break;
+  }
+  __android_log_write(priority, "laf", buf.data());
+#endif
 
 #ifdef _DEBUG
   #ifdef LAF_WINDOWS
@@ -104,7 +122,7 @@ void LOG(const char* format, ...)
 
   va_list ap;
   va_start(ap, format);
-  LOGva(format, ap);
+  LOGva(INFO, format, ap);
   va_end(ap);
 }
 
@@ -116,6 +134,6 @@ void LOG(const LogLevel level, const char* format, ...)
 
   va_list ap;
   va_start(ap, format);
-  LOGva(format, ap);
+  LOGva(level, format, ap);
   va_end(ap);
 }
