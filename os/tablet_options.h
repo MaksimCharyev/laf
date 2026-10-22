@@ -48,6 +48,12 @@ struct TabletOptions {
   // "xinput --list" command.
   std::string detectStylusPattern;
 #endif
+
+#if LAF_ANDROID
+  // Milliseconds after the pen leaves the screen range during which a
+  // new finger touch is ignored (palm rejection).
+  int penRejectionTimeout = 500;
+#endif
 };
 
 } // namespace os

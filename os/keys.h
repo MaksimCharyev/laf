@@ -146,6 +146,17 @@ enum KeyScancode {
   kKeyUnknown7 = 112,
   kKeyUnknown8 = 113,
 
+  // Virtual keys of touch/pen gestures (Android backend, ADR 0006
+  // of the Aseprite mobile port). They reuse the kKeyUnknown slots,
+  // so the numeric values of the other scancodes don't change.
+  kKeyPenDoubleTap = kKeyUnknown1,
+  kKeyTwoFingerTap = kKeyUnknown2,
+  kKeyThreeFingerTap = kKeyUnknown3,
+  // Only as KeyUp: the current pointer stroke was cancelled by the
+  // system (e.g. palm rejection), the MouseUp that follows must not
+  // commit it.
+  kKeyPointerCancel = kKeyUnknown4,
+
   kKeyFirstModifierScancode = 114,
 
   kKeyLShift = 114,
