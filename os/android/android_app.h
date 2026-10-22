@@ -74,6 +74,21 @@ bool android_document_to_provider(const std::string& path, std::string& error);
 // from any thread.
 void android_document_from_provider(const std::string& path);
 
+// Public "Download" folder (MediaStore.Downloads, ADR 0010). The
+// app writes a file inside android_downloads_cache_path() (a folder
+// in the app cache, e.g. "<cache>/downloads/Aseprite/foo.png") and
+// then calls android_publish_download() with that path: the file is
+// copied to "Download/<subfolder>/<name>" (e.g.
+// "Download/Aseprite/foo.png") as an entry owned by the app (no
+// permission needed), replacing the app's own entry with the same
+// name, and the cache file is deleted.
+std::string android_downloads_cache_path();
+
+// Returns false (with "error" set) if publishing fails; true if the
+// file was published or "path" is not inside
+// android_downloads_cache_path(). Can be called from any thread.
+bool android_publish_download(const std::string& path, std::string& error);
+
 // Optional hook defined by the app. If it's defined, android_main()
 // calls it once before app_main(), after HOME/XDG_CONFIG_HOME/TMPDIR
 // are set, from the same thread that will run app_main() (e.g. to

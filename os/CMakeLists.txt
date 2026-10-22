@@ -56,6 +56,7 @@ elseif(ANDROID)
   list(APPEND LAF_OS_SOURCES
     android/app.cpp
     android/documents.cpp
+    android/downloads.cpp
     android/event_queue.cpp
     android/jni.cpp
     android/keys.cpp
