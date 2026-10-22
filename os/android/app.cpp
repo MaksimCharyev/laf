@@ -18,6 +18,7 @@
 #include "os/android/window.h"
 #include "os/event.h"
 
+#include <android/api-level.h>
 #include <android/configuration.h>
 #include <android/keycodes.h>
 #include <android/native_window.h>
@@ -25,9 +26,11 @@
 #include <sys/system_properties.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -66,6 +69,30 @@ int read_debug_scale_property()
     return 0;
   const int scale = std::atoi(value);
   return (scale >= 1 && scale <= 9 ? scale : 0);
+}
+
+// Returns the integer value of a system property, or defValue if
+// it's not set.
+int read_int_property(const char* name, const int defValue)
+{
+  char value[PROP_VALUE_MAX] = { 0 };
+  if (__system_property_get(name, value) <= 0)
+    return defValue;
+  return std::atoi(value);
+}
+
+// Positions of android.view.RoundedCorner (API 31).
+enum { kTopLeft = 0, kTopRight = 1, kBottomRight = 2, kBottomLeft = 3 };
+
+// Inset needed on both sides of a rounded corner of the given radius
+// so a rectangle doesn't go out of it: with a margin "m" on both
+// sides, the corner of the rectangle is at (m, m) from the corner of
+// the display, which is on the arc when m = r * (1 - 1/sqrt(2)).
+int corner_inset(const int radius)
+{
+  if (radius <= 0)
+    return 0;
+  return int(std::ceil(radius * (1.0 - 1.0 / std::sqrt(2.0))));
 }
 
 // Keys that must reach the system (volume UI, camera, media
@@ -175,6 +202,7 @@ AppAndroid::AppAndroid(::android_app* app) : m_app(app)
   initJni();
 
   refreshConfiguration("startup", true);
+  refreshSafeArea("startup");
 
   // From now on, events queued from other threads wake up this
   // thread's looper.
@@ -190,6 +218,8 @@ AppAndroid::~AppAndroid()
       m_env->DeleteGlobalRef(m_activityClass);
     if (m_fileClass)
       m_env->DeleteGlobalRef(m_fileClass);
+    if (m_display)
+      m_env->DeleteGlobalRef(m_display);
     m_app->activity->vm->DetachCurrentThread();
     m_env = nullptr;
   }
@@ -331,6 +361,7 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
     case APP_CMD_INIT_WINDOW: {
       const gfx::Size sz = screenSize();
       LAF_ALOGI("APP_CMD_INIT_WINDOW: window %dx%d", sz.w, sz.h);
+      refreshSafeArea("APP_CMD_INIT_WINDOW");
       if (m_window && m_app->window)
         m_window->attachNativeWindow(m_app->window);
       break;
@@ -352,8 +383,7 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
                 m_app->contentRect.top,
                 m_app->contentRect.right,
                 m_app->contentRect.bottom);
-      if (m_window)
-        m_window->updateNativeWindowSize();
+      updateWindowSizeAndSafeArea(app_cmd_name(cmd));
       break;
 
     case APP_CMD_WINDOW_REDRAW_NEEDED:
@@ -364,8 +394,7 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
 
     case APP_CMD_CONFIG_CHANGED:
       refreshConfiguration("APP_CMD_CONFIG_CHANGED", false);
-      if (m_window)
-        m_window->updateNativeWindowSize();
+      updateWindowSizeAndSafeArea("CONFIG_CHANGED");
       break;
 
     case APP_CMD_RESUME: {
@@ -411,8 +440,12 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
     case APP_CMD_GAINED_FOCUS:
     case APP_CMD_LOST_FOCUS:
     case APP_CMD_SOFTWARE_KB_VIS_CHANGED:
-    case APP_CMD_WINDOW_INSETS_CHANGED:
     case APP_CMD_EDITOR_ACTION:           LAF_ALOGV("APP_CMD_%s", app_cmd_name(cmd)); break;
+
+    case APP_CMD_WINDOW_INSETS_CHANGED:
+      LAF_ALOGV("APP_CMD_WINDOW_INSETS_CHANGED");
+      updateWindowSizeAndSafeArea("WINDOW_INSETS_CHANGED");
+      break;
 
     case APP_CMD_KEY_EVENT:
     case APP_CMD_TOUCH_EVENT:
@@ -499,6 +532,119 @@ void AppAndroid::refreshConfiguration(const char* reason, const bool startup)
             screenDp.h);
 }
 
+bool AppAndroid::refreshSafeArea(const char* reason)
+{
+  int radius[4];
+  bool anyRadius = false;
+  for (int i = 0; i < 4; ++i) {
+    radius[i] = roundedCornerRadius(i);
+    anyRadius |= (radius[i] > 0);
+  }
+  const char* source = "Display.getRoundedCorner()";
+
+  // HarmonyOS 4 reports radius 0 for all corners (NOTES.md section
+  // 9) but has the radius in dp in a Huawei property.
+  if (!anyRadius) {
+    const int dp = read_int_property("ro.config.fillet_radius_size", 0);
+    if (dp > 0 && m_density > 0) {
+      std::fill(radius, radius + 4, (dp * m_density + 80) / 160);
+      source = "ro.config.fillet_radius_size";
+    }
+  }
+
+  // Testing aid to try other radii (in pixels, 0 = no corners):
+  //
+  //   adb shell setprop debug.laf.corner_radius 40
+  //
+  const int forced = read_int_property("debug.laf.corner_radius", -1);
+  if (forced >= 0) {
+    std::fill(radius, radius + 4, forced);
+    source = "debug.laf.corner_radius";
+  }
+
+  // The cutout and waterfall insets are kept by GameActivity (updated
+  // before APP_CMD_WINDOW_INSETS_CHANGED), they are 0 if there are
+  // none.
+  ARect cutout = {}, waterfall = {};
+  GameActivity_getWindowInsets(m_app->activity, GAMECOMMON_INSETS_TYPE_DISPLAY_CUTOUT, &cutout);
+  GameActivity_getWindowInsets(m_app->activity, GAMECOMMON_INSETS_TYPE_WATERFALL, &waterfall);
+
+  const gfx::Border safeArea(std::max({ corner_inset(radius[kTopLeft]),
+                                        corner_inset(radius[kBottomLeft]),
+                                        int(cutout.left),
+                                        int(waterfall.left) }),
+                             std::max({ corner_inset(radius[kTopLeft]),
+                                        corner_inset(radius[kTopRight]),
+                                        int(cutout.top),
+                                        int(waterfall.top) }),
+                             std::max({ corner_inset(radius[kTopRight]),
+                                        corner_inset(radius[kBottomRight]),
+                                        int(cutout.right),
+                                        int(waterfall.right) }),
+                             std::max({ corner_inset(radius[kBottomLeft]),
+                                        corner_inset(radius[kBottomRight]),
+                                        int(cutout.bottom),
+                                        int(waterfall.bottom) }));
+
+  if (safeArea == m_safeArea)
+    return false;
+
+  m_safeArea = safeArea;
+  LAF_ALOGI("%s: safe area insets=(%d %d %d %d) px, corner radii=(%d %d %d %d) px from %s, "
+            "cutout=(%d %d %d %d) waterfall=(%d %d %d %d)",
+            reason,
+            safeArea.left(),
+            safeArea.top(),
+            safeArea.right(),
+            safeArea.bottom(),
+            radius[kTopLeft],
+            radius[kTopRight],
+            radius[kBottomRight],
+            radius[kBottomLeft],
+            source,
+            cutout.left,
+            cutout.top,
+            cutout.right,
+            cutout.bottom,
+            waterfall.left,
+            waterfall.top,
+            waterfall.right,
+            waterfall.bottom);
+  return true;
+}
+
+void AppAndroid::updateWindowSizeAndSafeArea(const char* reason)
+{
+  const bool safeAreaChanged = refreshSafeArea(reason);
+  if (!m_window)
+    return;
+
+  m_window->updateNativeWindowSize();
+
+  // The app reads the safe area when the window is resized, so we
+  // send a resize event if only the insets changed.
+  if (safeAreaChanged)
+    m_window->requestRedraw();
+}
+
+int AppAndroid::roundedCornerRadius(const int position)
+{
+  if (!m_env || !m_display || !m_getRoundedCorner || !m_getRadius)
+    return 0;
+
+  // Display.getRoundedCorner() returns the corner for the current
+  // rotation, or null if the corner is not rounded.
+  int radius = 0;
+  jobject corner = m_env->CallObjectMethod(m_display, m_getRoundedCorner, jint(position));
+  if (!jni_exception_check(m_env, "Display.getRoundedCorner()") && corner) {
+    radius = m_env->CallIntMethod(corner, m_getRadius);
+    if (jni_exception_check(m_env, "RoundedCorner.getRadius()"))
+      radius = 0;
+    m_env->DeleteLocalRef(corner);
+  }
+  return std::max(0, radius);
+}
+
 void AppAndroid::startDestroyWatchdog()
 {
   if (g_destroyWatchdogStarted.exchange(true))
@@ -555,6 +701,44 @@ void AppAndroid::initJni()
     if (jni_exception_check(m_env, "GetMethodID(getAbsolutePath)"))
       m_getAbsolutePath = nullptr;
   }
+
+  // Rounded display corners: Activity.getDisplay() (API 30) and
+  // Display.getRoundedCorner() (API 31).
+  if (m_activityClass && android_get_device_api_level() >= 31)
+    initRoundedCornersJni();
+}
+
+void AppAndroid::initRoundedCornersJni()
+{
+  jmethodID getDisplay =
+    m_env->GetMethodID(m_activityClass, "getDisplay", "()Landroid/view/Display;");
+  if (jni_exception_check(m_env, "GetMethodID(getDisplay)") || !getDisplay)
+    return;
+
+  jobject display = m_env->CallObjectMethod(m_app->activity->javaGameActivity, getDisplay);
+  if (jni_exception_check(m_env, "Activity.getDisplay()") || !display)
+    return;
+
+  jclass displayClass = m_env->GetObjectClass(display);
+  if (!jni_exception_check(m_env, "GetObjectClass(display)") && displayClass) {
+    m_getRoundedCorner =
+      m_env->GetMethodID(displayClass, "getRoundedCorner", "(I)Landroid/view/RoundedCorner;");
+    if (jni_exception_check(m_env, "GetMethodID(getRoundedCorner)"))
+      m_getRoundedCorner = nullptr;
+    m_env->DeleteLocalRef(displayClass);
+  }
+
+  jclass cornerClass = m_env->FindClass("android/view/RoundedCorner");
+  if (!jni_exception_check(m_env, "FindClass(android/view/RoundedCorner)") && cornerClass) {
+    m_getRadius = m_env->GetMethodID(cornerClass, "getRadius", "()I");
+    if (jni_exception_check(m_env, "GetMethodID(getRadius)"))
+      m_getRadius = nullptr;
+    m_env->DeleteLocalRef(cornerClass);
+  }
+
+  if (m_getRoundedCorner && m_getRadius)
+    m_display = m_env->NewGlobalRef(display);
+  m_env->DeleteLocalRef(display);
 }
 
 std::string AppAndroid::cacheDir()
@@ -589,6 +773,13 @@ int android_screen_density()
   if (g_instance)
     return g_instance->density();
   return 0;
+}
+
+gfx::Border android_safe_area_insets()
+{
+  if (g_instance)
+    return g_instance->safeArea();
+  return gfx::Border();
 }
 
 } // namespace os

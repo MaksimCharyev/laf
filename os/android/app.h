@@ -8,6 +8,7 @@
 #define OS_ANDROID_APP_H_INCLUDED
 #pragma once
 
+#include "gfx/border.h"
 #include "gfx/size.h"
 
 #include <android/log.h>
@@ -85,6 +86,11 @@ public:
   // after startup.
   gfx::Size screenSize() const;
 
+  // Insets in pixels from each window edge that must be kept free
+  // of UI because the display corners are rounded or there is a
+  // display cutout (see refreshSafeArea()).
+  const gfx::Border& safeArea() const { return m_safeArea; }
+
   // True between APP_CMD_RESUME and APP_CMD_PAUSE.
   bool isResumed() const { return m_resumed; }
 
@@ -116,8 +122,12 @@ private:
   void handleAppCmd(int32_t cmd);
   void processInput();
   void refreshConfiguration(const char* reason, bool startup);
+  bool refreshSafeArea(const char* reason);
+  void updateWindowSizeAndSafeArea(const char* reason);
+  int roundedCornerRadius(int position);
   void startDestroyWatchdog();
   void initJni();
+  void initRoundedCornersJni();
   std::string cacheDir();
 
   static bool s_verbose;
@@ -130,12 +140,16 @@ private:
   int m_density = 0;
   gfx::Size m_screenSizeDp; // At startup only
   mutable gfx::Size m_lastWindowSize;
+  gfx::Border m_safeArea = gfx::Border(-1); // Invalid until the first refreshSafeArea()
 
   // JNI cache (global references), see os/android/jni.h.
   jclass m_activityClass = nullptr;
   jmethodID m_getCacheDir = nullptr;
   jclass m_fileClass = nullptr;
   jmethodID m_getAbsolutePath = nullptr;
+  jobject m_display = nullptr;            // android.view.Display of the activity
+  jmethodID m_getRoundedCorner = nullptr; // API 31
+  jmethodID m_getRadius = nullptr;
 };
 
 } // namespace os

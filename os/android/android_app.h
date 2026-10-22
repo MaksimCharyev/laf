@@ -12,6 +12,8 @@
 // It doesn't include the GameActivity headers, link with laf-os to
 // get them if you need the android_app fields.
 
+#include "gfx/border.h"
+
 struct android_app;
 
 namespace os {
@@ -24,6 +26,14 @@ namespace os {
 // 2.5x screen), refreshed on each APP_CMD_CONFIG_CHANGED.  Returns 0
 // if it's unknown.
 int android_screen_density();
+
+// Insets in pixels from each edge of the window where the app should
+// not place UI: the part of the rounded display corners outside a
+// rectangle (per corner side, ceil(radius * (1 - 1/sqrt(2)))), the
+// display cutout and waterfall insets, whichever is bigger. Updated
+// before the window resize event when the window is resized or
+// rotated, or when the insets change (a resize event is sent then).
+gfx::Border android_safe_area_insets();
 
 // Optional hook defined by the app. If it's defined, android_main()
 // calls it once before app_main(), after HOME/XDG_CONFIG_HOME/TMPDIR
