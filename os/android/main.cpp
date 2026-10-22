@@ -37,6 +37,7 @@ extern "C" void android_main(struct android_app* app)
     char* argv[] = { arg0, nullptr };
     LAF_ALOGI("android_main: calling app_main()");
     const int result = app_main(1, argv);
+    os::AppAndroid::setAppMainReturned();
     LAF_ALOGI("android_main: app_main() returned %d", result);
 
     appAndroid.finish();

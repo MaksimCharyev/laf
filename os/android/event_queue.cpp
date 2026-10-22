@@ -21,6 +21,13 @@
 
 namespace os {
 
+namespace {
+
+// Maximum wait in getEvent() after APP_CMD_DESTROY.
+constexpr base::tick_t kDestroyedWaitMsecs = 100;
+
+} // anonymous namespace
+
 EventQueueAndroid::EventQueueAndroid() : m_looper(nullptr), m_sleeping(false)
 {
 }
@@ -47,13 +54,27 @@ void EventQueueAndroid::getEvent(Event& ev, double timeout)
     app->pollLooper(0);
 
     if (m_events.empty() && timeout != 0.0) {
-      const bool withoutTimeout = (timeout < 0.0); // kWithoutTimeout
-      const base::tick_t deadline =
+      bool withoutTimeout = (timeout < 0.0); // kWithoutTimeout
+      base::tick_t deadline =
         (withoutTimeout ? 0 : base::current_tick() + base::tick_t(std::ceil(timeout * 1000.0)));
+
+      // After APP_CMD_DESTROY the app got CloseApp and should return
+      // from app_main() soon, but it can still be running (e.g. a
+      // "save changes?" alert without window). Never wait more than
+      // kDestroyedWaitMsecs then (the looper doesn't receive new
+      // commands, it could block forever), but don't return at once
+      // either (the app would spin). AppAndroid has a watchdog that
+      // ends the process if app_main() doesn't return.
+      if (app->isDestroyRequested()) {
+        const base::tick_t destroyedDeadline = base::current_tick() + kDestroyedWaitMsecs;
+        if (withoutTimeout || destroyedDeadline < deadline)
+          deadline = destroyedDeadline;
+        withoutTimeout = false;
+      }
 
       while (m_events.empty()) {
         int waitMsecs = -1;
-        if (!withoutTimeout && !app->canWaitWithoutTimeout()) {
+        if (!withoutTimeout && (!app->canWaitWithoutTimeout() || app->isDestroyRequested())) {
           const base::tick_t now = base::current_tick();
           if (now >= deadline)
             break;
@@ -68,10 +89,8 @@ void EventQueueAndroid::getEvent(Event& ev, double timeout)
           app->pollLooper(waitMsecs);
         m_sleeping = false;
 
-        // APP_CMD_DESTROY queues CloseApp, but don't wait forever if
-        // the app doesn't use it.
-        if (app->isDestroyRequested())
-          break;
+        // APP_CMD_DESTROY arrived while waiting: it queues CloseApp,
+        // so the loop ends anyway.
       }
     }
   }

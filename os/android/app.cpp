@@ -21,10 +21,17 @@
 #include <android/configuration.h>
 #include <android/keycodes.h>
 #include <android/native_window.h>
+#include <sys/stat.h>
 #include <sys/system_properties.h>
+#include <unistd.h>
 
+#include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <thread>
 
 namespace os {
 
@@ -35,12 +42,30 @@ AppAndroid* g_instance = nullptr;
 // Timeout to wait APP_CMD_DESTROY after GameActivity_finish().
 constexpr base::tick_t kFinishTimeoutMsecs = 2000;
 
+// Time after APP_CMD_DESTROY until the process is ended if it's still
+// alive. The Java thread is blocked in onDestroy() until
+// android_main() returns, so this must stay below the ANR timeout
+// (5 s).
+constexpr int kDestroyWatchdogMsecs = 2500;
+
+std::atomic<bool> g_appMainReturned(false);
+std::atomic<bool> g_destroyWatchdogStarted(false);
+
 bool read_verbose_property()
 {
   char value[PROP_VALUE_MAX] = { 0 };
   if (__system_property_get("debug.laf.verbose", value) <= 0)
     return false;
   return (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+}
+
+int read_debug_scale_property()
+{
+  char value[PROP_VALUE_MAX] = { 0 };
+  if (__system_property_get("debug.laf.scale", value) <= 0)
+    return 0;
+  const int scale = std::atoi(value);
+  return (scale >= 1 && scale <= 9 ? scale : 0);
 }
 
 // Keys that must reach the system (volume UI, camera, media
@@ -53,6 +78,8 @@ bool key_event_filter(const GameActivityKeyEvent* ev)
     case AKEYCODE_VOLUME_UP:
     case AKEYCODE_VOLUME_DOWN:
     case AKEYCODE_VOLUME_MUTE:
+    case AKEYCODE_MUTE:
+    case AKEYCODE_HEADSETHOOK:
     case AKEYCODE_CAMERA:
     case AKEYCODE_ZOOM_IN:
     case AKEYCODE_ZOOM_OUT:
@@ -120,6 +147,7 @@ const char* app_cmd_name(const int32_t cmd)
 } // anonymous namespace
 
 bool AppAndroid::s_verbose = false;
+int AppAndroid::s_debugScale = 0;
 
 // static
 AppAndroid* AppAndroid::instance()
@@ -132,6 +160,9 @@ AppAndroid::AppAndroid(::android_app* app) : m_app(app)
   ASSERT(!g_instance);
   g_instance = this;
   s_verbose = read_verbose_property();
+  s_debugScale = read_debug_scale_property();
+  if (s_debugScale)
+    LAF_ALOGI("android_main: debug.laf.scale=%d (window scale forced)", s_debugScale);
 
   m_app->onAppCmd = &AppAndroid::onAppCmd;
 
@@ -143,7 +174,7 @@ AppAndroid::AppAndroid(::android_app* app) : m_app(app)
   }
   initJni();
 
-  refreshConfiguration("startup");
+  refreshConfiguration("startup", true);
 
   // From now on, events queued from other threads wake up this
   // thread's looper.
@@ -184,6 +215,10 @@ void AppAndroid::setupEnvironment()
     if (pos != std::string::npos && pos > 0)
       tmpDir = tmpDir.substr(0, pos) + "/cache";
     LAF_ALOGW("android_main: getCacheDir() failed, using %s", tmpDir.c_str());
+
+    // getCacheDir() creates the directory, here we have to do it.
+    if (mkdir(tmpDir.c_str(), 0700) != 0 && errno != EEXIST)
+      LAF_ALOGE("android_main: cannot create %s (errno %d)", tmpDir.c_str(), errno);
   }
 
   setenv("HOME", filesDir, 1);
@@ -216,10 +251,17 @@ gfx::Size AppAndroid::screenSize() const
   if (m_app->window) {
     const int w = ANativeWindow_getWidth(m_app->window);
     const int h = ANativeWindow_getHeight(m_app->window);
-    if (w > 0 && h > 0)
-      return gfx::Size(w, h);
+    if (w > 0 && h > 0) {
+      m_lastWindowSize = gfx::Size(w, h);
+      return m_lastWindowSize;
+    }
   }
 
+  if (m_lastWindowSize.w > 0 && m_lastWindowSize.h > 0)
+    return m_lastWindowSize;
+
+  // Only before the first window (e.g. the app creates its window
+  // before APP_CMD_INIT_WINDOW).
   if (m_density > 0 && m_screenSizeDp.w > 0 && m_screenSizeDp.h > 0) {
     return gfx::Size((m_screenSizeDp.w * m_density + 80) / 160,
                      (m_screenSizeDp.h * m_density + 80) / 160);
@@ -321,7 +363,7 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
       break;
 
     case APP_CMD_CONFIG_CHANGED:
-      refreshConfiguration("APP_CMD_CONFIG_CHANGED");
+      refreshConfiguration("APP_CMD_CONFIG_CHANGED", false);
       if (m_window)
         m_window->updateNativeWindowSize();
       break;
@@ -356,6 +398,7 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
 
     case APP_CMD_DESTROY: {
       LAF_ALOGI("APP_CMD_DESTROY");
+      startDestroyWatchdog();
       // Usually it's the answer to GameActivity_finish() (see
       // finish()), but if the system destroys the activity while
       // app_main() is running we ask the app to quit.
@@ -419,13 +462,12 @@ void AppAndroid::processInput()
   android_app_clear_key_events(ib);
 }
 
-void AppAndroid::refreshConfiguration(const char* reason)
+void AppAndroid::refreshConfiguration(const char* reason, const bool startup)
 {
   AConfiguration* cfg = m_app->config;
 
   // The glue reads the configuration once at startup; refresh it
-  // so density/orientation/screen size are not stale after a
-  // configuration change.
+  // so the density is not stale after a configuration change.
   AConfiguration_fromAssetManager(cfg, m_app->activity->assetManager);
 
   m_density = AConfiguration_getDensity(cfg);
@@ -434,20 +476,59 @@ void AppAndroid::refreshConfiguration(const char* reason)
   else if (m_density == ACONFIGURATION_DENSITY_ANY || m_density == ACONFIGURATION_DENSITY_NONE)
     m_density = 0;
 
-  m_screenSizeDp = gfx::Size(AConfiguration_getScreenWidthDp(cfg),
-                             AConfiguration_getScreenHeightDp(cfg));
+  // Orientation and screen size in dp don't change after a rotation
+  // on HarmonyOS (NOTES.md section 9, M1.4), the screen dp size is
+  // used only before the first window, and both are logged as
+  // information only.
+  const gfx::Size screenDp(AConfiguration_getScreenWidthDp(cfg),
+                           AConfiguration_getScreenHeightDp(cfg));
+  if (startup)
+    m_screenSizeDp = screenDp;
 
   const gfx::Size sz = screenSize();
-  LAF_ALOGI("%s: density=%d (GameActivity %d) orientation=%d screen=%dx%ddp (%dx%d px) sdk=%d",
+  LAF_ALOGI("%s: density=%d (GameActivity %d) window=%dx%d px sdk=%d "
+            "(AConfiguration, may be stale: orientation=%d screen=%dx%ddp)",
             reason,
             m_density,
             GameActivity_getDensityDpi(m_app->activity),
-            AConfiguration_getOrientation(cfg),
-            m_screenSizeDp.w,
-            m_screenSizeDp.h,
             sz.w,
             sz.h,
-            AConfiguration_getSdkVersion(cfg));
+            AConfiguration_getSdkVersion(cfg),
+            AConfiguration_getOrientation(cfg),
+            screenDp.w,
+            screenDp.h);
+}
+
+void AppAndroid::startDestroyWatchdog()
+{
+  if (g_destroyWatchdogStarted.exchange(true))
+    return;
+
+  // The thread doesn't use "this" (AppAndroid is destroyed before
+  // android_main() ends the process).
+  try {
+    std::thread([] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kDestroyWatchdogMsecs));
+      if (g_appMainReturned)
+        LAF_ALOGW("APP_CMD_DESTROY watchdog: process still alive %d ms after APP_CMD_DESTROY, "
+                  "calling _exit(0)",
+                  kDestroyWatchdogMsecs);
+      else
+        LAF_ALOGW("APP_CMD_DESTROY watchdog: app_main() did not return %d ms after "
+                  "APP_CMD_DESTROY, calling _exit(0)",
+                  kDestroyWatchdogMsecs);
+      _exit(0);
+    }).detach();
+  }
+  catch (const std::exception& ex) {
+    LAF_ALOGE("APP_CMD_DESTROY watchdog: cannot start thread (%s)", ex.what());
+  }
+}
+
+// static
+void AppAndroid::setAppMainReturned()
+{
+  g_appMainReturned = true;
 }
 
 void AppAndroid::initJni()

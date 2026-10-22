@@ -22,7 +22,8 @@
 
 namespace os {
 
-WindowAndroid::WindowAndroid(const WindowSpec& spec) : m_scale(std::max(1, spec.scale()))
+WindowAndroid::WindowAndroid(const WindowSpec& spec)
+  : m_scale(AppAndroid::debugScale() ? AppAndroid::debugScale() : std::max(1, spec.scale()))
 {
   AppAndroid* app = AppAndroid::instance();
   if (!app)
@@ -84,6 +85,15 @@ os::ColorSpaceRef WindowAndroid::colorSpace() const
 void WindowAndroid::setScale(const int scale)
 {
   m_scale = std::max(1, scale);
+
+  // Testing aid: debug.laf.scale replaces the scale requested by the
+  // app (see AppAndroid::debugScale()).
+  if (const int debugScale = AppAndroid::debugScale()) {
+    if (debugScale != m_scale)
+      LAF_ALOGI("Window scale %d requested, using debug.laf.scale=%d", m_scale, debugScale);
+    m_scale = debugScale;
+  }
+
   onResize(m_size);
 }
 

@@ -47,6 +47,17 @@ public:
   static AppAndroid* instance();
   static bool verbose() { return s_verbose; }
 
+  // Window scale forced for testing (0 = use the scale requested by
+  // the app), see WindowAndroid::setScale():
+  //
+  //   adb shell setprop debug.laf.scale 2   (then restart the app)
+  //
+  static int debugScale() { return s_debugScale; }
+
+  // Called by android_main() when app_main() returns (from the glue
+  // thread). Only used by the APP_CMD_DESTROY watchdog log.
+  static void setAppMainReturned();
+
   explicit AppAndroid(::android_app* app);
   ~AppAndroid();
 
@@ -62,9 +73,16 @@ public:
   // axes that GameActivity doesn't report by default (ADR 0006).
   void setupInput();
 
-  // Configuration values (from AConfiguration, refreshed on
+  // Density in dpi (from AConfiguration, refreshed on
   // APP_CMD_CONFIG_CHANGED).
   int density() const { return m_density; }
+
+  // Size of the ANativeWindow in pixels, or the last known size if
+  // there is no window now (paused). Before the first window it's
+  // estimated from the screen size in dp read at startup.
+  // AConfiguration orientation and screen size are stale after a
+  // rotation on HarmonyOS (NOTES.md section 9), so they're not used
+  // after startup.
   gfx::Size screenSize() const;
 
   // True between APP_CMD_RESUME and APP_CMD_PAUSE.
@@ -97,18 +115,21 @@ private:
   static void onAppCmd(::android_app* app, int32_t cmd);
   void handleAppCmd(int32_t cmd);
   void processInput();
-  void refreshConfiguration(const char* reason);
+  void refreshConfiguration(const char* reason, bool startup);
+  void startDestroyWatchdog();
   void initJni();
   std::string cacheDir();
 
   static bool s_verbose;
+  static int s_debugScale;
 
   ::android_app* m_app;
   JNIEnv* m_env = nullptr;
   WindowAndroid* m_window = nullptr;
   bool m_resumed = false;
   int m_density = 0;
-  gfx::Size m_screenSizeDp;
+  gfx::Size m_screenSizeDp; // At startup only
+  mutable gfx::Size m_lastWindowSize;
 
   // JNI cache (global references), see os/android/jni.h.
   jclass m_activityClass = nullptr;
