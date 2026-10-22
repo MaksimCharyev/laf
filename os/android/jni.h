@@ -32,6 +32,28 @@ bool jni_exception_check(JNIEnv* env, const char* what);
 // Converts a java.lang.String to UTF-8 (empty string if str is null).
 std::string jni_to_string(JNIEnv* env, jstring str);
 
+// Returns a new local reference to a java.lang.String with the given
+// UTF-8 text (nullptr on error, the exception is cleared).
+jstring jni_new_string(JNIEnv* env, const std::string& str);
+
+// JNIEnv for the current thread. If the thread is not attached to the
+// JVM (e.g. a worker thread of the app), it's attached here and
+// detached in the destructor.
+class JniThreadEnv {
+public:
+  explicit JniThreadEnv(JavaVM* vm);
+  ~JniThreadEnv();
+  JniThreadEnv(const JniThreadEnv&) = delete;
+  JniThreadEnv& operator=(const JniThreadEnv&) = delete;
+
+  JNIEnv* env() const { return m_env; }
+
+private:
+  JavaVM* m_vm;
+  JNIEnv* m_env = nullptr;
+  bool m_attached = false;
+};
+
 } // namespace os
 
 #endif

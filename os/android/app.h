@@ -11,7 +11,9 @@
 #include "gfx/border.h"
 #include "gfx/point.h"
 #include "gfx/size.h"
+#include "os/android/keys.h"
 #include "os/android/pointer_input.h"
+#include "os/android/text_input.h"
 
 #include <android/log.h>
 #include <game-activity/native_app_glue/android_native_app_glue.h>
@@ -81,6 +83,13 @@ public:
   // pixels (see System::mousePosition()).
   gfx::Point mousePosition() const { return m_pointerInput.lastPosition(); }
 
+  // State of the hardware keyboard (System::isKeyPressed() etc.).
+  KeyInputAndroid& keyInput() { return m_keyInput; }
+
+  // Shows/hides the soft keyboard (System::setTextInput(), M2.4). It's
+  // not shown if a hardware keyboard is attached.
+  void setTextInput(bool state);
+
   // Density in dpi (from AConfiguration, refreshed on
   // APP_CMD_CONFIG_CHANGED).
   int density() const { return m_density; }
@@ -129,6 +138,10 @@ private:
   void handleAppCmd(int32_t cmd);
   void processInput();
   void processMotionEvent(const GameActivityMotionEvent& ev, base::tick_t now);
+  void processKeyEvent(const GameActivityKeyEvent& ev);
+  void processTextInput();
+  void queueKeyEvents(std::vector<Event>& events);
+  bool hasHardwareKeyboard() const;
   void queueInputEvents();
   void resetInput(const char* reason);
   int waitTimeout(int timeoutMs) const;
@@ -157,6 +170,13 @@ private:
   PointerInputAndroid m_pointerInput;
   MotionEventAndroid m_motion;      // Reused for each motion event
   std::vector<Event> m_inputEvents; // Output of m_pointerInput
+
+  // Translation of hardware keyboard events (ADR 0006 section 11).
+  KeyInputAndroid m_keyInput;
+
+  // Soft keyboard text (GameTextInput) -> key events.
+  TextInputAndroid m_textInput;
+  bool m_textInputActive = false;
 
   // JNI cache (global references), see os/android/jni.h.
   jclass m_activityClass = nullptr;

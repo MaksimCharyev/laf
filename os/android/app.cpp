@@ -23,6 +23,7 @@
 #include <android/configuration.h>
 #include <android/input.h>
 #include <android/keycodes.h>
+#include <android/looper.h>
 #include <android/native_window.h>
 #include <sys/stat.h>
 #include <sys/system_properties.h>
@@ -187,6 +188,21 @@ static_assert(M::kSourceClassPointer == AINPUT_SOURCE_CLASS_POINTER &&
               "Sources");
 static_assert(M::kMaxPointers == GAMEACTIVITY_MAX_NUM_POINTERS_IN_MOTION_EVENT,
               "GAMEACTIVITY_MAX_NUM_POINTERS_IN_MOTION_EVENT must not be overridden");
+
+// Original GameActivity callback installed by the glue: it only sets
+// android_app::textInputState, without waking up the looper.
+void (*g_glueTextInputEvent)(GameActivity*, const GameTextInputState*) = nullptr;
+
+void on_text_input_event(GameActivity* activity, const GameTextInputState* state)
+{
+  if (g_glueTextInputEvent)
+    g_glueTextInputEvent(activity, state);
+
+  // Called on the Java UI thread: wake up the glue thread so the text
+  // is processed now (see AppAndroid::processTextInput()).
+  if (AppAndroid* app = AppAndroid::instance())
+    ALooper_wake(app->app()->looper);
+}
 
 // Maximum distance between the two taps of a double click, in dp.
 constexpr int kDoubleClickSlopDp = 16;
@@ -409,6 +425,20 @@ void AppAndroid::setupInput()
 
   m_pointerInput.setLogFunc(pointer_input_log);
 
+  // Soft keyboard (M2.4): one-line text, "Done" action, no full-screen
+  // editor, no suggestions (fewer composing rewrites). The glue
+  // doesn't wake up the looper on text changes, so the callback is
+  // wrapped.
+  GameActivity_setImeEditorInfo(
+    m_app->activity,
+    GameTextInputType(TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_NO_SUGGESTIONS),
+    IME_ACTION_DONE,
+    GameTextInputImeOptions(IME_FLAG_NO_FULLSCREEN | IME_FLAG_NO_EXTRACT_UI));
+  if (m_app->activity->callbacks->onTextInputEvent != on_text_input_event) {
+    g_glueTextInputEvent = m_app->activity->callbacks->onTextInputEvent;
+    m_app->activity->callbacks->onTextInputEvent = on_text_input_event;
+  }
+
   LAF_ALOGI("android_main: input filters installed (all motion sources, system keys excluded), "
             "pen/finger/mouse -> mouse events (ADR 0006)");
 }
@@ -579,10 +609,34 @@ void AppAndroid::handleAppCmd(const int32_t cmd)
       break;
     }
 
-    case APP_CMD_GAINED_FOCUS:
     case APP_CMD_LOST_FOCUS:
+      LAF_ALOGV("APP_CMD_LOST_FOCUS");
+      // Keys released while another window has the focus (e.g. the
+      // notification shade) don't send their UP to us.
+      m_keyInput.reset();
+      break;
+
+    case APP_CMD_EDITOR_ACTION:
+      LAF_ALOGV("APP_CMD_EDITOR_ACTION: action=%d", m_app->editorAction);
+      // "Done" key of the soft keyboard.
+      if (m_textInputActive) {
+        std::vector<Event> events;
+        TextInputAndroid::editorAction(events);
+        queueKeyEvents(events);
+      }
+      break;
+
     case APP_CMD_SOFTWARE_KB_VIS_CHANGED:
-    case APP_CMD_EDITOR_ACTION:           LAF_ALOGV("APP_CMD_%s", app_cmd_name(cmd)); break;
+      LAF_ALOGV("APP_CMD_SOFTWARE_KB_VIS_CHANGED: visible=%d", int(m_app->softwareKeyboardVisible));
+      // Hidden by the user (Back, keyboard button): the next focus on a
+      // text field shows it again.
+      if (!m_app->softwareKeyboardVisible && m_textInputActive) {
+        m_textInputActive = false;
+        LAF_ALOGI("input: soft keyboard hidden by the user");
+      }
+      break;
+
+    case APP_CMD_GAINED_FOCUS: LAF_ALOGV("APP_CMD_%s", app_cmd_name(cmd)); break;
 
     case APP_CMD_WINDOW_INSETS_CHANGED:
       LAF_ALOGV("APP_CMD_WINDOW_INSETS_CHANGED");
@@ -620,30 +674,21 @@ void AppAndroid::processInput()
 
     // Pen gesture keys (M-Pencil double-tap = keyCode 718) become
     // virtual scancodes (kKeyPenDoubleTap) here, before and apart from
-    // the generic key translation, which must skip them
-    // (PointerInputAndroid::isGestureKey()).
+    // the generic key translation, which skips them.
     for (uint64_t i = 0; i < ib->keyEventsCount; ++i) {
       const GameActivityKeyEvent& ev = ib->keyEvents[i];
-      m_pointerInput.processKey(ev.action, ev.keyCode, ev.repeatCount, now, m_inputEvents);
-    }
-
-    // TODO M2.3-M2.4: translate key events into os::Event (ADR 0006
-    //      section 11). Until then they are only logged in verbose
-    //      mode and dropped.
-    if (verbose()) {
-      for (uint64_t i = 0; i < ib->keyEventsCount; ++i) {
-        const GameActivityKeyEvent& ev = ib->keyEvents[i];
-        LAF_ALOGV("key: action=%d keyCode=%d scanCode=%d repeat=%d",
-                  ev.action,
-                  ev.keyCode,
-                  ev.scanCode,
-                  ev.repeatCount);
-      }
+      if (PointerInputAndroid::isGestureKey(ev.keyCode))
+        m_pointerInput.processKey(ev.action, ev.keyCode, ev.repeatCount, now, m_inputEvents);
+      else
+        processKeyEvent(ev);
     }
 
     android_app_clear_motion_events(ib);
     android_app_clear_key_events(ib);
   }
+
+  if (m_app->textInputState)
+    processTextInput();
 
   // Deferred MouseLeave (pen hover exit, ADR 0006 section 3).
   m_pointerInput.processTimers(now, m_inputEvents);
@@ -708,6 +753,116 @@ void AppAndroid::processMotionEvent(const GameActivityMotionEvent& ev, const bas
   m_pointerInput.processMotion(m, now, m_inputEvents);
 }
 
+void AppAndroid::processKeyEvent(const GameActivityKeyEvent& ev)
+{
+  KeyEventAndroid k;
+  k.action = ev.action;
+  k.keyCode = ev.keyCode;
+  k.scanCode = ev.scanCode;
+  k.metaState = ev.metaState;
+  k.repeatCount = ev.repeatCount;
+  k.unicodeChar = ev.unicodeChar;
+
+  Event out;
+  const bool queued = m_keyInput.processKey(k, out);
+  LAF_ALOGV("input: key %s keyCode=%d scanCode=%d meta=0x%x repeat=%d unicode=0x%x device=%d "
+            "source=0x%x -> %s scancode=%d unicode=0x%x modifiers=0x%x",
+            (ev.action == AKEY_EVENT_ACTION_DOWN ? "DOWN" :
+             ev.action == AKEY_EVENT_ACTION_UP   ? "UP" :
+                                                   "?"),
+            ev.keyCode,
+            ev.scanCode,
+            ev.metaState,
+            ev.repeatCount,
+            unsigned(ev.unicodeChar),
+            ev.deviceId,
+            ev.source,
+            (queued ? (out.type() == Event::KeyDown ? "KeyDown" : "KeyUp") : "ignored"),
+            (queued ? int(out.scancode()) : 0),
+            (queued ? unsigned(out.unicodeChar()) : 0u),
+            (queued ? unsigned(out.modifiers()) : 0u));
+  if (!queued)
+    return;
+
+  std::vector<Event> events{ out };
+  queueKeyEvents(events);
+}
+
+void AppAndroid::processTextInput()
+{
+  m_app->textInputState = 0;
+
+  std::string text;
+  GameActivity_getTextInputState(
+    m_app->activity,
+    [](void* context, const GameTextInputState* state) {
+      if (state && state->text_UTF8)
+        static_cast<std::string*>(context)->assign(state->text_UTF8, state->text_length);
+    },
+    &text);
+
+  if (!m_textInputActive) {
+    LAF_ALOGV("input: soft keyboard text ignored (text input is off)");
+    return;
+  }
+
+  std::vector<Event> events;
+  m_textInput.update(text, events);
+  LAF_ALOGV("input: soft keyboard text \"%s\" -> %d key event(s)",
+            text.c_str(),
+            int(events.size()));
+  queueKeyEvents(events);
+}
+
+void AppAndroid::queueKeyEvents(std::vector<Event>& events)
+{
+  for (Event& ev : events) {
+    if (m_window)
+      m_window->queueEvent(ev);
+    else
+      queue_event(ev);
+  }
+  events.clear();
+}
+
+void AppAndroid::setTextInput(const bool state)
+{
+  if (state == m_textInputActive)
+    return;
+
+  if (state && hasHardwareKeyboard()) {
+    LAF_ALOGV("input: text input on, hardware keyboard attached (soft keyboard not shown)");
+    return;
+  }
+
+  m_textInputActive = state;
+  if (state) {
+    // Start with an empty IME text, the app's field gets the typed
+    // characters as key events (TextInputAndroid).
+    m_textInput.reset();
+    GameTextInputState empty = {};
+    empty.text_UTF8 = "";
+    empty.text_length = 0;
+    empty.selection = { 0, 0 };
+    empty.composingRegion = { SPAN_UNDEFINED, SPAN_UNDEFINED };
+    GameActivity_setTextInputState(m_app->activity, &empty);
+    GameActivity_showSoftInput(m_app->activity, 0);
+    LAF_ALOGI("input: text input on, showing the soft keyboard");
+  }
+  else {
+    GameActivity_hideSoftInput(m_app->activity, 0);
+    LAF_ALOGI("input: text input off, hiding the soft keyboard");
+  }
+}
+
+bool AppAndroid::hasHardwareKeyboard() const
+{
+  // Updated on APP_CMD_CONFIG_CHANGED (attaching a keyboard changes
+  // the "keyboard" and "keyboardHidden" configuration).
+  return (AConfiguration_getKeyboard(m_app->config) == ACONFIGURATION_KEYBOARD_QWERTY &&
+          AConfiguration_getKeysHidden(m_app->config) != ACONFIGURATION_KEYSHIDDEN_YES);
+}
+
 void AppAndroid::queueInputEvents()
 {
   for (Event& ev : m_inputEvents) {
@@ -735,6 +890,8 @@ void AppAndroid::queueInputEvents()
 
 void AppAndroid::resetInput(const char* reason)
 {
+  // No key UP will arrive for the keys held now.
+  m_keyInput.reset();
   m_pointerInput.reset(m_inputEvents);
   if (!m_inputEvents.empty())
     LAF_ALOGV("input: reset (%s)", reason);
@@ -772,6 +929,12 @@ void AppAndroid::refreshConfiguration(const char* reason, const bool startup)
                            AConfiguration_getScreenHeightDp(cfg));
   if (startup)
     m_screenSizeDp = screenDp;
+
+  LAF_ALOGI("%s: keyboard=%d keysHidden=%d (hardware keyboard %s)",
+            reason,
+            AConfiguration_getKeyboard(cfg),
+            AConfiguration_getKeysHidden(cfg),
+            hasHardwareKeyboard() ? "attached" : "not attached");
 
   const gfx::Size sz = screenSize();
   LAF_ALOGI("%s: density=%d (GameActivity %d) window=%dx%d px sdk=%d "

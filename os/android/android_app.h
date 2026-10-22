@@ -12,7 +12,10 @@
 // It doesn't include the GameActivity headers, link with laf-os to
 // get them if you need the android_app fields.
 
+#include "base/paths.h"
 #include "gfx/border.h"
+
+#include <string>
 
 struct android_app;
 
@@ -34,6 +37,42 @@ int android_screen_density();
 // before the window resize event when the window is resized or
 // rotated, or when the insets change (a resize event is sent then).
 gfx::Border android_safe_area_insets();
+
+// Storage Access Framework documents (ADR 0009). The system picker
+// returns content:// URIs; each one is mapped to a file with the same
+// display name in the app cache, and the app works with that path.
+
+enum class AndroidDocumentPicker {
+  Open,         // ACTION_OPEN_DOCUMENT
+  OpenMultiple, // ACTION_OPEN_DOCUMENT with EXTRA_ALLOW_MULTIPLE
+  Save,         // ACTION_CREATE_DOCUMENT
+};
+
+// Shows the system picker and waits for it (modal, from the thread
+// that runs app_main(); lifecycle commands are processed meanwhile).
+// "initialPath" is the current file name (its name is suggested when
+// saving, its folder is opened if it's a picked document) and
+// "defaultExtension" is added to a saved file without extension.
+// Opened documents are copied to their paths before returning.
+// Returns 1 if "output" has the paths, 0 if the user cancelled, or -1
+// if the picker cannot be shown.
+int android_pick_documents(AndroidDocumentPicker type,
+                           const std::string& initialPath,
+                           const std::string& defaultExtension,
+                           base::paths& output);
+
+// Must be called after the app writes a file: if "path" is mapped to
+// a picked document, the file is copied to it. Returns false (with
+// "error" set) if the copy fails; true if it was copied or the path
+// is not a picked document. Can be called from any thread.
+bool android_document_to_provider(const std::string& path, std::string& error);
+
+// Should be called before the app reads a file: if "path" is mapped
+// to a picked document that was not copied in this process yet (e.g.
+// it comes from the recent files list), it's copied again from the
+// document. Errors are logged (the old copy is kept). Can be called
+// from any thread.
+void android_document_from_provider(const std::string& path);
 
 // Optional hook defined by the app. If it's defined, android_main()
 // calls it once before app_main(), after HOME/XDG_CONFIG_HOME/TMPDIR

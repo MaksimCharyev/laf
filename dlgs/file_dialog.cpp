@@ -44,6 +44,8 @@ FileDialogRef FileDialog::make(const Spec& spec)
   return FileDialog::makeOSX(spec);
 #elif LAF_LINUX
   return FileDialog::makeX11(spec);
+#elif LAF_ANDROID
+  return FileDialog::makeAndroid(spec);
 #else
   return nullptr;
 #endif

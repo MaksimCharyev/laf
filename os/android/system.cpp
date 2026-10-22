@@ -20,6 +20,32 @@ SystemAndroid::~SystemAndroid()
   destroyInstance();
 }
 
+bool SystemAndroid::isKeyPressed(const KeyScancode scancode)
+{
+  if (AppAndroid* app = AppAndroid::instance())
+    return app->keyInput().isKeyPressed(scancode);
+  return false;
+}
+
+void SystemAndroid::resetKeyPressed()
+{
+  if (AppAndroid* app = AppAndroid::instance())
+    app->keyInput().reset();
+}
+
+int SystemAndroid::getUnicodeFromScancode(const KeyScancode scancode)
+{
+  if (AppAndroid* app = AppAndroid::instance())
+    return app->keyInput().unicodeFromScancode(scancode);
+  return 0;
+}
+
+void SystemAndroid::setTextInput(const bool state, const gfx::Point&)
+{
+  if (AppAndroid* app = AppAndroid::instance())
+    app->setTextInput(state);
+}
+
 gfx::Point SystemAndroid::mousePosition() const
 {
   if (AppAndroid* app = AppAndroid::instance())

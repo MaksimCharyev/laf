@@ -23,10 +23,13 @@ public:
   void setTabletOptions(const TabletOptions& options) override { m_tabletOptions = options; }
   TabletOptions tabletOptions() const override { return m_tabletOptions; }
 
-  // TODO M2.3 hardware keyboard state
-  bool isKeyPressed(KeyScancode scancode) override { return false; }
-  void resetKeyPressed() override {}
-  int getUnicodeFromScancode(KeyScancode scancode) override { return 0; }
+  // Hardware keyboard state (os/android/keys.h).
+  bool isKeyPressed(KeyScancode scancode) override;
+  void resetKeyPressed() override;
+  int getUnicodeFromScancode(KeyScancode scancode) override;
+
+  // Soft keyboard (M2.4).
+  void setTextInput(bool state, const gfx::Point& screenCaretPos) override;
 
   // Last position of the pen/finger/mouse (window pixels, the window
   // is at the screen origin).
