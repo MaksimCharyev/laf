@@ -9,8 +9,10 @@ if(WIN32)
 elseif(APPLE)
   target_sources(laf-dlgs PRIVATE file_dialog_osx.mm)
 elseif(ANDROID)
-  # No native file dialog on Android yet: FileDialog::make() returns
-  # nullptr when there is no platform implementation.
+  # System document picker (Storage Access Framework) through the
+  # os/android backend, which owns the JNI and the event loop.
+  target_sources(laf-dlgs PRIVATE file_dialog_android.cpp)
+  target_link_libraries(laf-dlgs laf-os)
 else()
   target_sources(laf-dlgs PRIVATE file_dialog_x11.cpp)
 endif()

@@ -77,6 +77,8 @@ public:
   static FileDialogRef makeOSX(const Spec& spec);
 #elif LAF_LINUX
   static FileDialogRef makeX11(const Spec& spec);
+#elif LAF_ANDROID
+  static FileDialogRef makeAndroid(const Spec& spec);
 #endif
 
   virtual ~FileDialog() {}
@@ -91,7 +93,7 @@ public:
   virtual void setFileName(const std::string& filename) = 0;
 
   // The native window handle is an HWND on Windows, a NSWindow* on
-  // macOS, or an X11 Window on Linux.
+  // macOS, or an X11 Window on Linux (unused on Android).
   virtual Result show(void* windowNative) = 0;
 
 protected:
