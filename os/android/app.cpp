@@ -762,9 +762,22 @@ void AppAndroid::processKeyEvent(const GameActivityKeyEvent& ev)
   k.metaState = ev.metaState;
   k.repeatCount = ev.repeatCount;
   k.unicodeChar = ev.unicodeChar;
+  k.deviceId = ev.deviceId;
+  // GameActivity gives the KeyEvent time in ns; fallback to now.
+  k.eventTime = (ev.eventTime > 0 ? ev.eventTime : int64_t(base::current_tick()) * 1000000);
 
   Event out;
   const bool queued = m_keyInput.processKey(k, out);
+  if (m_keyInput.lastWasDuplicate()) {
+    LAF_ALOGV("input: duplicate key from device %d dropped (IME re-injection) "
+              "%s keyCode=%d scanCode=%d repeat=%d",
+              ev.deviceId,
+              (ev.action == AKEY_EVENT_ACTION_DOWN ? "DOWN" : "UP"),
+              ev.keyCode,
+              ev.scanCode,
+              ev.repeatCount);
+    return;
+  }
   LAF_ALOGV("input: key %s keyCode=%d scanCode=%d meta=0x%x repeat=%d unicode=0x%x device=%d "
             "source=0x%x -> %s scancode=%d unicode=0x%x modifiers=0x%x",
             (ev.action == AKEY_EVENT_ACTION_DOWN ? "DOWN" :

@@ -239,6 +239,7 @@ KeyModifiers android_meta_to_modifiers(const int metaState)
 
 bool KeyInputAndroid::processKey(const KeyEventAndroid& ev, Event& out)
 {
+  m_lastWasDuplicate = false;
   if (ev.action != KeyEventAndroid::kActionDown && ev.action != KeyEventAndroid::kActionUp)
     return false;
   // Handled as kKeyPenDoubleTap by the gesture code
@@ -262,6 +263,11 @@ bool KeyInputAndroid::processKey(const KeyEventAndroid& ev, Event& out)
 
   if (scancode == kKeyNil && unicode == 0)
     return false;
+
+  if (isDuplicate(ev)) {
+    m_lastWasDuplicate = true;
+    return false;
+  }
 
   // A modifier released while the app had no focus never sends its UP.
   dropStaleModifiers(ev.metaState, ev.keyCode);
@@ -319,6 +325,73 @@ void KeyInputAndroid::reset()
 {
   m_pressed.clear();
   m_metaState = 0;
+  m_accepted.clear();
+  m_droppedDowns.clear();
+  m_lastWasDuplicate = false;
+}
+
+bool KeyInputAndroid::isDuplicate(const KeyEventAndroid& ev)
+{
+  const bool down = (ev.action == KeyEventAndroid::kActionDown);
+  const bool repeat = (down && ev.repeatCount > 0);
+
+  // UP of a DOWN dropped as duplicate: dropped if the key was already
+  // released (by the UP of the other device). If the key is still
+  // pressed it's accepted, so the key can't stay stuck when the other
+  // device never sends its UP; the other UP is then dropped below.
+  if (!down) {
+    auto it = std::find_if(
+      m_droppedDowns.begin(),
+      m_droppedDowns.end(),
+      [&ev](const DroppedDown& d) { return d.keyCode == ev.keyCode && d.deviceId == ev.deviceId; });
+    if (it != m_droppedDowns.end()) {
+      m_droppedDowns.erase(it);
+      if (std::find(m_pressed.begin(), m_pressed.end(), ev.keyCode) == m_pressed.end() &&
+          android_keycode_to_scancode(ev.keyCode) != kKeyNil) {
+        return true;
+      }
+    }
+  }
+
+  auto it = std::find_if(m_accepted.begin(), m_accepted.end(), [&](const Accepted& a) {
+    return a.action == ev.action && a.repeat == repeat && a.keyCode == ev.keyCode;
+  });
+  if (it != m_accepted.end() && it->deviceId != ev.deviceId) {
+    const int64_t dt = ev.eventTime - it->eventTime;
+    if (dt >= -kDuplicateWindowNs && dt <= kDuplicateWindowNs) {
+      if (down && !repeat) {
+        auto d = std::find_if(m_droppedDowns.begin(),
+                              m_droppedDowns.end(),
+                              [&ev](const DroppedDown& d) { return d.keyCode == ev.keyCode; });
+        if (d != m_droppedDowns.end())
+          d->deviceId = ev.deviceId;
+        else
+          m_droppedDowns.push_back({ ev.keyCode, ev.deviceId });
+      }
+      return true;
+    }
+  }
+
+  // A new press from this device: forget an old dropped DOWN of the
+  // key (its UP was lost).
+  if (down && !repeat) {
+    m_droppedDowns.erase(std::remove_if(m_droppedDowns.begin(),
+                                        m_droppedDowns.end(),
+                                        [&ev](const DroppedDown& d) {
+                                          return d.keyCode == ev.keyCode &&
+                                                 d.deviceId == ev.deviceId;
+                                        }),
+                         m_droppedDowns.end());
+  }
+
+  if (it != m_accepted.end()) {
+    it->deviceId = ev.deviceId;
+    it->eventTime = ev.eventTime;
+  }
+  else {
+    m_accepted.push_back({ ev.action, repeat, ev.keyCode, ev.deviceId, ev.eventTime });
+  }
+  return false;
 }
 
 void KeyInputAndroid::setPressed(const int keyCode, const bool pressed)

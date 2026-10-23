@@ -52,6 +52,11 @@ struct KeyEventAndroid {
   int metaState = 0;
   int repeatCount = 0;
   int unicodeChar = 0;
+  // InputDevice id (KeyEvent.getDeviceId()): -1 is
+  // KeyCharacterMap.VIRTUAL_KEYBOARD (keys injected by an IME).
+  int deviceId = 0;
+  // KeyEvent time in nanoseconds (SystemClock.uptimeMillis() clock).
+  int64_t eventTime = 0;
 };
 
 // Translates hardware keyboard events into KeyDown/KeyUp os::Events
@@ -67,12 +72,30 @@ struct KeyEventAndroid {
 // Keys without scancode still produce events if they have a unicode
 // character (e.g. symbols of other layouts), so they can be typed.
 // Dead keys are sent without character (not composed).
+//
+// Duplicates from IME re-injection: some IMEs (Huawei) handle the
+// physical keyboard while an input connection exists and re-inject
+// each key as a VIRTUAL_KEYBOARD (device -1) event, so the same press
+// arrives twice from two devices ~8-15 ms apart, in either order (and
+// sometimes only one of them arrives). An event is dropped if an
+// event with the same action, keyCode and repeat class (first DOWN vs
+// auto-repeat DOWN) from a different device was accepted within
+// kDuplicateWindowNs. The first copy is kept (no added latency).
+// Events from the same device are never dropped (auto-repeat, quick
+// presses), and the UP of a dropped DOWN is dropped too when the key
+// was already released by the other device.
 class KeyInputAndroid {
 public:
+  static constexpr int64_t kDuplicateWindowNs = 60 * 1000000LL; // 60 ms
+
   // Returns false if the event must be ignored (no os::Event):
   // unknown keys without character, the pen double-tap key (718),
-  // and actions other than DOWN/UP.
+  // actions other than DOWN/UP, and duplicates (see lastWasDuplicate()).
   bool processKey(const KeyEventAndroid& ev, Event& out);
+
+  // True if the last processKey() dropped the event as a duplicate
+  // from another device.
+  bool lastWasDuplicate() const { return m_lastWasDuplicate; }
 
   bool isKeyPressed(KeyScancode scancode) const;
   KeyModifiers modifiers() const;
@@ -86,9 +109,28 @@ public:
   void reset();
 
 private:
+  // Last accepted event of each (action, repeat class, keyCode).
+  struct Accepted {
+    int action;
+    bool repeat;
+    int keyCode;
+    int deviceId;
+    int64_t eventTime;
+  };
+  // A DOWN dropped as duplicate, its UP from the same device is
+  // dropped if the key was released.
+  struct DroppedDown {
+    int keyCode;
+    int deviceId;
+  };
+
+  bool isDuplicate(const KeyEventAndroid& ev);
   void setPressed(int keyCode, bool pressed);
   void dropStaleModifiers(int metaState, int keyCode);
 
+  std::vector<Accepted> m_accepted;
+  std::vector<DroppedDown> m_droppedDowns;
+  bool m_lastWasDuplicate = false;
   std::vector<int> m_pressed; // Android key codes
   int m_metaState = 0;        // Of the last event
   int m_unicode[kKeyScancodes] = {};

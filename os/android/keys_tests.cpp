@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include <vector>
+
 #include "os/android/keys.h"
 
 using namespace os;
@@ -22,6 +24,8 @@ enum {
   BACK = 4,
   A = 29,
   B = 30,
+  H = 36,
+  J = 38,
   Z = 54,
   ALT_LEFT = 57,
   SHIFT_LEFT = 59,
@@ -45,6 +49,33 @@ K key(int action, int keyCode, int meta = 0, int unicode = 0, int repeat = 0)
   ev.unicodeChar = unicode;
   ev.repeatCount = repeat;
   return ev;
+}
+
+// Device ids from the Huawei MatePad log (NOTES.md section 6).
+constexpr int kHw = 131; // Huawei Magnetic Keyboard
+constexpr int kIme = -1; // KeyCharacterMap.VIRTUAL_KEYBOARD
+constexpr int kHwMeta = 0x200000;
+
+// Key event of a device at a time in milliseconds.
+K dev(int action, int keyCode, int device, int64_t ms, int repeat = 0, int unicode = 0)
+{
+  K ev = key(action, keyCode, (device == kHw ? kHwMeta : 0), unicode, repeat);
+  ev.deviceId = device;
+  ev.scanCode = (device == kHw ? 14 : 0);
+  ev.eventTime = ms * 1000000;
+  return ev;
+}
+
+// Feeds the events and returns the queued os::Events.
+std::vector<Event> feed(KeyInputAndroid& input, const std::vector<K>& evs)
+{
+  std::vector<Event> out;
+  for (const K& k : evs) {
+    Event ev;
+    if (input.processKey(k, ev))
+      out.push_back(ev);
+  }
+  return out;
 }
 
 } // anonymous namespace
@@ -241,6 +272,192 @@ TEST(AndroidKeys, UnicodeFromScancode)
   EXPECT_EQ('/', input.unicodeFromScancode(kKeySlash));
   EXPECT_EQ(0, input.unicodeFromScancode(kKeyF1));
   EXPECT_EQ(0, input.unicodeFromScancode(kKeyNil));
+}
+
+// 19:51:53.719 kc=67 dev=-1, 19:51:53.734 kc=67 dev=131: the IME
+// copy first.
+TEST(AndroidKeys, DuplicateImeFirst)
+{
+  KeyInputAndroid input;
+  Event ev;
+
+  ASSERT_TRUE(input.processKey(dev(K::kActionDown, DEL, kIme, 53719), ev));
+  EXPECT_EQ(kKeyBackspace, ev.scancode());
+  EXPECT_FALSE(input.lastWasDuplicate());
+  EXPECT_FALSE(input.processKey(dev(K::kActionDown, DEL, kHw, 53734), ev));
+  EXPECT_TRUE(input.lastWasDuplicate());
+  EXPECT_TRUE(input.isKeyPressed(kKeyBackspace));
+
+  // UP from the hardware first: still accepted (the key is pressed),
+  // the IME one is the duplicate.
+  ASSERT_TRUE(input.processKey(dev(K::kActionUp, DEL, kHw, 53820), ev));
+  EXPECT_EQ(Event::KeyUp, ev.type());
+  EXPECT_FALSE(input.isKeyPressed(kKeyBackspace));
+  EXPECT_FALSE(input.processKey(dev(K::kActionUp, DEL, kIme, 53830), ev));
+  EXPECT_TRUE(input.lastWasDuplicate());
+}
+
+// 19:51:54.424 kc=38 dev=-1, 19:51:54.439 kc=38 dev=131, typing "j".
+TEST(AndroidKeys, DuplicateLetter)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, J, kIme, 54424, 0, 'j'),
+                          dev(K::kActionDown, J, kHw, 54439, 0, 'j'),
+                          dev(K::kActionUp, J, kIme, 54510, 0, 'j'),
+                          dev(K::kActionUp, J, kHw, 54522, 0, 'j'),
+                        });
+  ASSERT_EQ(2u, out.size());
+  EXPECT_EQ(Event::KeyDown, out[0].type());
+  EXPECT_EQ('j', out[0].unicodeChar());
+  EXPECT_EQ(Event::KeyUp, out[1].type());
+  EXPECT_FALSE(input.isKeyPressed(kKeyJ));
+}
+
+TEST(AndroidKeys, DuplicateHardwareFirst)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, H, kHw, 1000, 0, 'h'),
+                          dev(K::kActionDown, H, kIme, 1008, 0, 'h'),
+                          dev(K::kActionUp, H, kIme, 1090, 0, 'h'),
+                          dev(K::kActionUp, H, kHw, 1100, 0, 'h'),
+                          // Space doubled too.
+                          dev(K::kActionDown, SPACE, kHw, 1200, 0, ' '),
+                          dev(K::kActionDown, SPACE, kIme, 1215, 0, ' '),
+                          dev(K::kActionUp, SPACE, kHw, 1290, 0, ' '),
+                          dev(K::kActionUp, SPACE, kIme, 1300, 0, ' '),
+                        });
+  ASSERT_EQ(4u, out.size());
+  EXPECT_EQ(Event::KeyDown, out[0].type());
+  EXPECT_EQ(kKeyH, out[0].scancode());
+  EXPECT_EQ(Event::KeyUp, out[1].type());
+  EXPECT_EQ(Event::KeyDown, out[2].type());
+  EXPECT_EQ(kKeySpace, out[2].scancode());
+  EXPECT_EQ(Event::KeyUp, out[3].type());
+  EXPECT_FALSE(input.isKeyPressed(kKeyH));
+  EXPECT_FALSE(input.isKeyPressed(kKeySpace));
+  EXPECT_EQ(kKeyNoneModifier, input.modifiers());
+}
+
+// Backspace held: hardware auto-repeat every ~50 ms, each repeat also
+// re-injected by the IME.
+TEST(AndroidKeys, DuplicateAutoRepeat)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, DEL, kHw, 0),
+                          dev(K::kActionDown, DEL, kIme, 12),
+                          dev(K::kActionDown, DEL, kHw, 400, 1),
+                          dev(K::kActionDown, DEL, kIme, 410, 1),
+                          // IME first, but 45 ms after the accepted hardware repeat 1:
+                          // dropped, the hardware stays the source.
+                          dev(K::kActionDown, DEL, kIme, 445, 2),
+                          dev(K::kActionDown, DEL, kHw, 450, 2),
+                          dev(K::kActionDown, DEL, kHw, 500, 3),
+                          dev(K::kActionDown, DEL, kIme, 512, 3),
+                          dev(K::kActionUp, DEL, kHw, 560),
+                          dev(K::kActionUp, DEL, kIme, 571),
+                        });
+  ASSERT_EQ(5u, out.size());
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(Event::KeyDown, out[i].type());
+    EXPECT_EQ(kKeyBackspace, out[i].scancode());
+    EXPECT_EQ(i, out[i].repeat());
+  }
+  EXPECT_EQ(Event::KeyUp, out[4].type());
+  EXPECT_FALSE(input.isKeyPressed(kKeyBackspace));
+}
+
+// Auto-repeat from the hardware only (the IME doesn't re-inject it),
+// after the first DOWN was taken from the IME.
+TEST(AndroidKeys, AutoRepeatFromOtherDeviceKept)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, DEL, kIme, 0),
+                          dev(K::kActionDown, DEL, kHw, 10),
+                          dev(K::kActionDown, DEL, kHw, 400, 1),
+                          dev(K::kActionDown, DEL, kHw, 450, 2),
+                          dev(K::kActionDown, DEL, kHw, 500, 3),
+                          dev(K::kActionUp, DEL, kIme, 540),
+                          dev(K::kActionUp, DEL, kHw, 552),
+                        });
+  ASSERT_EQ(5u, out.size());
+  EXPECT_EQ(0, out[0].repeat());
+  EXPECT_EQ(1, out[1].repeat());
+  EXPECT_EQ(3, out[3].repeat());
+  EXPECT_EQ(Event::KeyUp, out[4].type());
+  EXPECT_FALSE(input.isKeyPressed(kKeyBackspace));
+}
+
+// Early in the session only the IME copy arrives: nothing is dropped,
+// also fast typing of the same letter.
+TEST(AndroidKeys, OnlyImeCopy)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, A, kIme, 0, 0, 'a'),
+                          dev(K::kActionUp, A, kIme, 30, 0, 'a'),
+                          dev(K::kActionDown, A, kIme, 50, 0, 'a'),
+                          dev(K::kActionUp, A, kIme, 80, 0, 'a'),
+                          dev(K::kActionDown, B, kIme, 90, 0, 'b'),
+                          dev(K::kActionUp, B, kIme, 120, 0, 'b'),
+                        });
+  ASSERT_EQ(6u, out.size());
+  EXPECT_EQ('a', out[0].unicodeChar());
+  EXPECT_EQ('a', out[2].unicodeChar());
+  EXPECT_EQ('b', out[4].unicodeChar());
+}
+
+// Two quick presses of the same key from the hardware are kept.
+TEST(AndroidKeys, QuickPressesSameDevice)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, A, kHw, 0, 0, 'a'),
+                          dev(K::kActionUp, A, kHw, 20, 0, 'a'),
+                          dev(K::kActionDown, A, kHw, 40, 0, 'a'),
+                          dev(K::kActionUp, A, kHw, 55, 0, 'a'),
+                        });
+  EXPECT_EQ(4u, out.size());
+}
+
+// The same key from another device after the window is a new press.
+TEST(AndroidKeys, OtherDeviceAfterWindow)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, A, kHw, 0, 0, 'a'),
+                          dev(K::kActionUp, A, kHw, 50, 0, 'a'),
+                          dev(K::kActionDown, A, kIme, 200, 0, 'a'),
+                          dev(K::kActionUp, A, kIme, 250, 0, 'a'),
+                        });
+  EXPECT_EQ(4u, out.size());
+}
+
+// The UP of a dropped DOWN is dropped even late, once the key was
+// released by the other device.
+TEST(AndroidKeys, DroppedDownLateUp)
+{
+  KeyInputAndroid input;
+  const auto out = feed(input,
+                        {
+                          dev(K::kActionDown, H, kIme, 0, 0, 'h'),
+                          dev(K::kActionDown, H, kHw, 10, 0, 'h'),
+                          dev(K::kActionUp, H, kIme, 100, 0, 'h'),
+                          dev(K::kActionUp, H, kHw, 300, 0, 'h'),
+                        });
+  ASSERT_EQ(2u, out.size());
+  EXPECT_EQ(Event::KeyDown, out[0].type());
+  EXPECT_EQ(Event::KeyUp, out[1].type());
 }
 
 int app_main(int argc, char* argv[])
